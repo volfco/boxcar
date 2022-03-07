@@ -1,0 +1,9 @@
+- Once an RPC is finished, the message needs to be sent to all clients who are subscribed
+  - Track subscribers
+    - clients are automatically subscribed to all rasks they create
+    - clients are un-subscribe on connection close
+  - Add method to subscribe to slot
+
+- garbage collect results after X unit of time.
+  - time based?
+  - # of RPCs executed?

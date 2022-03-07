@@ -39,7 +39,6 @@ pub type Callback = Box<dyn Fn(&str) -> bool + Sync + Send>;
 #[derive(Serialize, Deserialize, PartialEq, Debug, Clone)]
 /// TODO Make this into something better
 pub struct WireMessage {
-    pub init: bool,
     pub c_slot: u16,
     pub subscribe: bool,
     pub inner: Vec<u8>
@@ -97,16 +96,17 @@ impl Transport {
 
         // Worker to handle outgoing messages
         let worker_flush = flush.clone();
+        let addr2 = addr.clone();
         tokio::spawn(async move {
             // handle each message in the mpsc channel
             while let Some(wire_message) = tx.recv().await {
-                tracing::trace!("outgoing message: {:?}", &wire_message);
+                tracing::trace!(client = addr2.as_str(), "outgoing message: {:?}", &wire_message);
                 // send the message out over the socket
                 let raw =  bincode::serialize(&wire_message).unwrap();
-                tracing::debug!("sending: {:?}", &raw);
+                tracing::debug!(client = addr2.as_str(), "successfully decoded message: {:?}", &raw);
                 match ws_tx.send(tokio_tungstenite::tungstenite::Message::Binary(raw)).await {
-                    Ok(_) => tracing::trace!("successfully flushed message to socket"),
-                    Err(err) => tracing::error!("unable to flush message to socket. {:?}", err),
+                    Ok(_) => tracing::trace!(client = addr2.as_str(), "successfully flushed message to socket"),
+                    Err(err) => tracing::error!(client = addr2.as_str(), "unable to flush message to socket. {:?}", err),
                 };
                 worker_flush.notify_one();
             }
@@ -123,12 +123,12 @@ impl Transport {
                         match packet {
                             Message::Binary(raw) => {
                                 match rxa.try_push(bincode::deserialize(&raw[..]).unwrap()) {
-                                    Ok(_) => tracing::trace!("successfully flushed wire message to consumer queue"),
-                                    Err(_) => tracing::error!("unable to flush message to consumer queue")
+                                    Ok(_) => tracing::trace!(client = addr.as_str(), "flushed wire message to consumer queue"),
+                                    Err(_) => tracing::error!(client = addr.as_str(), "unable to flush message to consumer queue")
                                 }
                             }
                             Message::Text(_) | Message::Pong(_) | Message::Ping(_) |Message::Close(_) => {
-                                tracing::warn!("got message with non-binary data. ignoring");
+                                tracing::warn!(client = addr.as_str(), "got message with non-binary data. ignoring");
                                 continue;
                             }
                         }
@@ -174,7 +174,7 @@ impl Transport {
             Some(slot) => slot
         };
 
-        self.outbox.send(WireMessage { init: false, c_slot, subscribe, inner  }).await?;
+        self.outbox.send(WireMessage { c_slot, subscribe, inner  }).await?;
 
         Ok(c_slot)
     }
@@ -182,7 +182,6 @@ impl Transport {
     pub async fn send_initial(&self, c_slot: u16) -> Result<(), mpsc::error::SendError<WireMessage>> {
 
         self.outbox.send(WireMessage {
-            init: true,
             c_slot,
             subscribe: false,
             inner: vec![]
@@ -206,7 +205,7 @@ pub enum BoxcarMessage {
     /// Initiate an RPC
     RpcReq(RpcRequest),
     /// RPC Status
-    RpcRslt(RpcResult),
+    RpcRslt((u16, RpcResult)),
 
     ServerError(String)
 }
@@ -243,6 +242,15 @@ pub struct BoxcarExecutor {
     tasks: Arc<RwLock<BTreeMap<u16, Arc<RwLock<RPCTask>>>>>
 }
 impl BoxcarExecutor {
+    pub fn new() -> Self {
+        BoxcarExecutor {
+            slots: Arc::new(Default::default()),
+            subscriber_map: Default::default(),
+            handlers: Default::default(),
+            tasks: Default::default()
+        }
+    }
+
     /// Add
     pub async fn add_handler(&mut self, handle: Handler) {
         self.handlers.write().await.push(Arc::new(handle))
@@ -280,9 +288,9 @@ impl BoxcarExecutor {
     }
 
     pub async fn execute_task(&mut self, request: RpcRequest) -> anyhow::Result<u16> {
-        let slot = self.assign_slot().await;
+        let s_slot = self.assign_slot().await;
         let task = RPCTask {
-            slot,
+            slot: s_slot,
             request,
             result: RpcResult::None
         };
@@ -291,17 +299,20 @@ impl BoxcarExecutor {
         // search through registered handles to find the one that contains the requested method
         let handle = self
             .handlers.read().await;
+
+        tracing::trace!("number of registered handlers: {}", handle.len());
         let handle = handle
             .iter()
             .find(|v| v.contains(task.request.method.as_str()));
+
         if handle.is_none() {
+            tracing::error!(method = task.request.method.as_str(), "requested handler does not exist");
             bail!("no such handler");
         }
 
-
         // build task arc, and insert it into our map
         let task_ref = Arc::new(RwLock::new(task));
-        self.tasks.write().await.insert(slot, task_ref.clone());
+        self.tasks.write().await.insert(s_slot, task_ref.clone());
 
         let handler = handle.unwrap().clone();
 
@@ -310,13 +321,13 @@ impl BoxcarExecutor {
 
             // pull out the operation information, as we don't want to move stuff into our handler
             let task = task_ref.read().await;
-            let slot = task.slot;
+            let s_slot = task.slot;
 
             // // run the handler
-            tracing::debug!("---- entering task handler ----");
+            tracing::debug!(s_slot = s_slot, "---- entering task handler ----");
             let result = handler.call(task.request.method.as_str(), task.request.body.clone()).await;
-            tracing::debug!("---- leaving  task handler ----");
-            tracing::debug!("task slot {} returned {:?}", &slot, &result);
+            tracing::debug!(s_slot = s_slot, "---- leaving  task handler ----");
+            tracing::debug!(s_slot = s_slot, "rpc returned {:?}", &result);
 
             // why is there a drop here? I don't know, but if you remove it- you don't save `result`
             drop(task);
@@ -326,14 +337,14 @@ impl BoxcarExecutor {
         };
 
         if delay {
-            tracing::trace!("spawning task on a blocking thread");
+            tracing::trace!(s_slot = s_slot, "spawning task on a blocking thread");
             tokio::task::spawn_blocking(move || closure);
         } else {
-            tracing::trace!("spawning task in a non-blocking fashion");
+            tracing::trace!(s_slot = s_slot, "spawning task in a non-blocking fashion");
             tokio::task::spawn(closure);
         }
 
-        Ok(slot)
+        Ok(s_slot)
     }
 
 }
@@ -358,33 +369,37 @@ impl Server {
 }
 
 pub async fn connection_handler(stream: TcpStream, addr: SocketAddr, mut executor: BoxcarExecutor) {
-    let transport = Transport::server(stream, addr.clone()).await.unwrap();
+    let transport = Transport::server(stream, addr).await.unwrap();
     let addr = addr.to_string();
 
     // before we do anything, send a message to the client with a new c_slot
-    let initial_slot = transport.allocate_slot().await;
-    tracing::debug!(client = addr.as_str(), "allocating slot {} for initial communications", initial_slot);
-    match transport.send_initial(initial_slot).await {
-        Ok(_) => tracing::trace!(client = addr.as_str(), "successfully flushed initial packet"),
-        Err(err) => {
-            tracing::error!(client = addr.as_str(), "unable to send initial packet to client. {:?}", err)
-        }
-    }
+    // let initial_slot = transport.allocate_slot().await;
+    // tracing::debug!(client = addr.as_str(), "allocating slot {} for initial communications", initial_slot);
+    // match transport.send_initial(initial_slot).await {
+    //     Ok(_) => tracing::trace!(client = addr.as_str(), "successfully flushed initial packet"),
+    //     Err(err) => {
+    //         tracing::error!(client = addr.as_str(), "unable to send initial packet to client. {:?}", err)
+    //     }
+    // }
 
-    while let message = transport.recv().await {
+    loop {
+        let message = transport.recv().await;
         let boxcar_message: BoxcarMessage = bincode::deserialize(&*message.inner).unwrap();
         let response = match boxcar_message {
             BoxcarMessage::RpcReq(req) => {
                 match executor.execute_task(req).await {
-                    Ok(slot) => {
-                        tracing::debug!(address = addr.as_str(), slot = slot, "successfully scheduled rpc");
-                        match executor.get_rpc(slot).await {
+                    Ok(s_slot) => {
+                        tracing::debug!(address = addr.as_str(), c_slot = message.c_slot, s_slot = s_slot, "successfully scheduled rpc");
+                        match executor.get_rpc(s_slot).await {
                             None => panic!("just spawned a task, but executor does not contain the task info"),
-                            Some(inner) => BoxcarMessage::RpcRslt(inner.result)
+                            Some(inner) => BoxcarMessage::RpcRslt((s_slot, inner.result))
                         }
 
                     }
-                    Err(error) => BoxcarMessage::ServerError(format!("unable to execute rpc. {:?}", error))
+                    Err(err) => {
+                        tracing::warn!("unable to execute rpc. {:?}", &err);
+                        BoxcarMessage::ServerError(format!("unable to execute rpc. {:?}", err))
+                    }
                 }
 
             }
@@ -408,19 +423,38 @@ pub struct Session {
     notify: Arc<Notify>
 }
 impl Session {
-    pub fn eq(&self, slot: u16) -> bool {
-        self.c_slot == slot
-    }
-
     pub async fn call(&self, req: RpcRequest) -> anyhow::Result<()> {
         let message = BoxcarMessage::RpcReq(req);
+        tracing::debug!(c_slot = self.c_slot, "{:?}", &message);
         let _q = self.transport.send(Some(self.c_slot), bincode::serialize(&message)?, false).await;
 
         Ok(())
     }
 
-    pub async fn deliver(&mut self, _message: BoxcarMessage) {
+    /// Deliver a message
+    pub async fn deliver(&mut self, message: BoxcarMessage) {
+        self.inbox.push(message);
+        self.notify.notify_one();
+    }
 
+    /// Receive a message from the inbox, waiting for a message to arrive it is empty
+    pub async fn recv(&mut self) -> BoxcarMessage {
+        if self.inbox.is_empty() {
+            tracing::trace!(c_slot = self.c_slot, "inbox is empty, waiting for a message to be delivered");
+            self.notify.notified().await;
+        }
+        self.inbox.pop().unwrap()
+    }
+
+    /// Try and Receive a message, returning none if the inbox is empty
+    pub async fn try_recv(&mut self) -> Option<BoxcarMessage> {
+        self.inbox.pop()
+    }
+
+    /// Probe the status of the RPC
+    pub async fn probe(&self) -> anyhow::Result<()> {
+
+        todo!()
     }
 }
 
@@ -437,23 +471,23 @@ impl Client {
         let trx = transport.clone();
         let sesh = sessions.clone();
         tokio::spawn(async move {
-            while let message = trx.recv().await {
+            loop {
+                let message = trx.recv().await;
                 let mut session_handle = sesh.write().await;
-                let slot = message.c_slot;
+                let c_slot = message.c_slot;
 
                 // locate the proper session to route the message to
-                let handle = session_handle.iter_mut().find(|v| v.eq(slot));
+                let handle = session_handle.iter_mut().find(|v| v.c_slot == c_slot);
                 if handle.is_none() {
-                    // TODO words
-                    tracing::warn!("server sent message with unknown c_slot ");
+                    tracing::warn!(c_slot = c_slot, "unknown c_slot or no such session exists");
                     continue;
                 }
 
                 let decoded = bincode::deserialize(&message.inner);
                 let inner = handle.unwrap();
                 let msg = decoded.unwrap();
-                tracing::trace!(slot = slot, "delivering message to session inbox. {:?}", &msg);
-                inner.inbox.push(msg);
+                tracing::trace!(c_slot = c_slot, "delivering message to session inbox. {:?}", &msg);
+                inner.deliver(msg).await;
             }
         });
 
@@ -464,12 +498,14 @@ impl Client {
     }
 
     pub async fn session(&self) -> Session {
-        Session {
+        let session = Session {
             c_slot: self.transport.allocate_slot().await,
             transport: self.transport.clone(),
             inbox: vec![],
             notify: Arc::new(Default::default())
-        }
+        };
+        self.sessions.write().await.push(session.clone());
+        session
     }
 }
 
@@ -478,7 +514,6 @@ impl Client {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::time::Duration;
     use async_trait::async_trait;
     use tokio::time::sleep;
@@ -492,7 +527,8 @@ mod tests {
             RpcResult::Ok(vec![])
         }
 
-        fn contains(&self, _: &str) -> bool {
+        fn contains(&self, method: &str) -> bool {
+            println!("method: {}", method);
             true
         }
 
@@ -557,10 +593,15 @@ mod tests {
     #[tokio::test]
     async fn test_initial_packet() {
         tracing_subscriber::fmt::init();
+
         // create a server
+        let test_handler = TestHandler {};
+        let mut executor = BoxcarExecutor::new();
+        executor.add_handler(Box::new(test_handler)).await;
+
         let server = Server {
             bind_addr: "127.0.0.1:9002".to_string(),
-            executor: BoxcarExecutor { slots: Arc::new(Default::default()), subscriber_map: Default::default(), handlers: Arc::new(Default::default()), tasks: Arc::new(Default::default()) }
+            executor
         };
         // spawn server
         tokio::task::spawn(async move {
@@ -574,7 +615,22 @@ mod tests {
         let client = Client::new("ws://127.0.0.1:9002").await;
         // establish a session
 
-        sleep(Duration::from_secs(1)).await
+        sleep(Duration::from_secs(1)).await;
+
+        let mut session = client.session().await;
+        let _ = session.call(RpcRequest {
+            method: "foo".to_string(),
+            body: vec![],
+            delay: false
+        }).await;
+
+        sleep(Duration::from_secs(1)).await;
+        let result = session.try_recv().await;
+        println!("{:?}", result);
+
+        sleep(Duration::from_secs(1)).await;
+
+
     }
 
 }
