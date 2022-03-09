@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use std::error::Error;
 use deadqueue::limited::Queue;
 
-
 use crate::executor::BoxcarExecutor;
 
 
@@ -323,8 +322,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_delayed_execution() {
-        tracing_subscriber::fmt::init();
-        //
         // create a server
         let test_handler = TestHandler {};
         let mut executor = BoxcarExecutor::new();
