@@ -166,15 +166,14 @@ pub struct Session {
 impl Session {
     pub async fn call(&self, req: RpcRequest) -> anyhow::Result<()> {
         let message = BoxcarMessage::RpcReq(req);
-        tracing::debug!(c_slot = self.c_slot, "{:?}", &message);
+        // tracing::debug!(c_slot = self.c_slot, "{:?}", &message);
         let _q = self.transport.send(Some(self.c_slot), bincode::serialize(&message)?, false).await;
-
         Ok(())
     }
 
     /// Deliver a message
     pub async fn deliver(&mut self, message: BoxcarMessage) {
-        self.inbox.push(message);
+        self.inbox.push(message).await;
         self.notify.notify_one();
         tracing::trace!(c_slot = self.c_slot, "oh look, i got a message!")
     }
@@ -191,7 +190,6 @@ impl Session {
 
     /// Probe the status of the RPC
     pub async fn probe(&self) -> anyhow::Result<()> {
-
         todo!()
     }
 }
@@ -324,7 +322,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_initial_packet() {
+    async fn test_delayed_execution() {
         tracing_subscriber::fmt::init();
         //
         // create a server
@@ -363,10 +361,7 @@ mod tests {
 
         sleep(Duration::from_secs(2)).await;
         let result = session.try_recv().await;
-        println!("{:?}", &result);
-
-
-
+        assert_eq!(result.is_none(), false);
     }
 
 }
