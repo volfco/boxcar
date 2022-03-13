@@ -1,11 +1,11 @@
+use rand::Rng;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
-use rand::Rng;
 use tokio::sync::{Notify, RwLock};
 
 use anyhow::bail;
 
-use crate::{Handler, RpcRequest, Transport, RpcResult, RPCTask};
+use crate::{Handler, RPCTask, RpcRequest, RpcResult, Transport};
 
 #[derive(Clone)]
 pub struct BoxcarExecutor {
@@ -14,7 +14,7 @@ pub struct BoxcarExecutor {
     /// Map that maps a Transport to all slots it is listening to
     pub(crate) subscriber_map: HashMap<Transport, Vec<u16>>,
     pub(crate) handlers: Arc<RwLock<Vec<Arc<Handler>>>>,
-    pub(crate) tasks: Arc<RwLock<BTreeMap<u16, Arc<RwLock<RPCTask>>>>>
+    pub(crate) tasks: Arc<RwLock<BTreeMap<u16, Arc<RwLock<RPCTask>>>>>,
 }
 impl BoxcarExecutor {
     pub fn new() -> Self {
@@ -22,7 +22,7 @@ impl BoxcarExecutor {
             slots: Arc::new(Default::default()),
             subscriber_map: Default::default(),
             handlers: Default::default(),
-            tasks: Default::default()
+            tasks: Default::default(),
         }
     }
 
@@ -39,7 +39,7 @@ impl BoxcarExecutor {
     pub async fn get_rpc(&self, slot: u16) -> Option<RPCTask> {
         match self.tasks.read().await.get(&slot) {
             None => None,
-            Some(task) => Some(task.read().await.clone())
+            Some(task) => Some(task.read().await.clone()),
         }
     }
 
@@ -62,27 +62,37 @@ impl BoxcarExecutor {
         }
     }
 
-    pub async fn execute_task(&mut self, request: RpcRequest) -> anyhow::Result<(u16, Arc<Notify>)> {
+    pub async fn execute_task(
+        &mut self,
+        request: RpcRequest,
+    ) -> anyhow::Result<(u16, Arc<Notify>)> {
         let s_slot = self.assign_slot().await;
         let task = RPCTask {
             slot: s_slot,
             request,
-            result: RpcResult::None
+            result: RpcResult::None,
         };
         tracing::debug!(s_slot = s_slot, "executing RPCTask {:?}", &task);
         let delay = task.request.delay;
 
         // search through registered handles to find the one that contains the requested method
-        let handle = self
-            .handlers.read().await;
+        let handle = self.handlers.read().await;
 
-        tracing::trace!(s_slot = s_slot, "number of registered handlers: {}", handle.len());
+        tracing::trace!(
+            s_slot = s_slot,
+            "number of registered handlers: {}",
+            handle.len()
+        );
         let handle = handle
             .iter()
             .find(|v| v.contains(task.request.method.as_str()));
 
         if handle.is_none() {
-            tracing::error!(s_slot = s_slot, method = task.request.method.as_str(), "requested handler does not exist");
+            tracing::error!(
+                s_slot = s_slot,
+                method = task.request.method.as_str(),
+                "requested handler does not exist"
+            );
             bail!("no such handler");
         }
 
@@ -105,7 +115,9 @@ impl BoxcarExecutor {
 
             // // run the handler
             tracing::debug!(s_slot = s_slot, "---- entering task handler ----");
-            let result = handler.call(task.request.method.as_str(), task.request.body.clone()).await;
+            let result = handler
+                .call(task.request.method.as_str(), task.request.body.clone())
+                .await;
             tracing::debug!(s_slot = s_slot, "---- leaving  task handler ----");
             tracing::info!(s_slot = s_slot, "rpc returned {:?}", &result);
 
@@ -127,5 +139,9 @@ impl BoxcarExecutor {
 
         Ok((s_slot, notifier))
     }
-
+}
+impl Default for BoxcarExecutor {
+    fn default() -> Self {
+        Self::new()
+    }
 }

@@ -21,4 +21,4 @@ tokio-tungstenite = { version = "0.16"}
 
 futures-core = "0.3"
 futures-util = "0.3"
-deadqueue = { git = "https://github.com/volfco/deadqueue.git" }
+deadqueue = "0.2"

@@ -1,7 +1,7 @@
 pub mod executor;
 pub mod transport;
 
-pub use crate::transport::{WireMessage, Transport};
+pub use crate::transport::{Transport, WireMessage};
 
 // TODO Implement RPC Result expiration on number of rpcs completed. By default purge after (2*max concurrent tasks) stored RPCResults
 use std::net::SocketAddr;
@@ -9,14 +9,13 @@ use std::sync::Arc;
 use tokio::sync::Notify;
 use tokio::sync::RwLock;
 
-use serde::{Serialize, Deserialize};
-use tokio::net::{TcpListener, TcpStream};
 use async_trait::async_trait;
-use std::error::Error;
 use deadqueue::limited::Queue;
+use serde::{Deserialize, Serialize};
+use std::error::Error;
+use tokio::net::{TcpListener, TcpStream};
 
 use crate::executor::BoxcarExecutor;
-
 
 pub trait BoxcarMessageTrait {
     fn encode(&self, buf: &mut Vec<u8>) -> Result<(), Box<dyn Error>>;
@@ -33,7 +32,6 @@ pub trait HandlerTrait {
 pub type Handler = Box<dyn HandlerTrait + Sync + Send + 'static>;
 pub type Callback = Box<dyn Fn(&str) -> bool + Sync + Send>;
 
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BoxcarMessage {
     /// Initiate an RPC
@@ -41,7 +39,13 @@ pub enum BoxcarMessage {
     /// RPC Status
     RpcRslt((u16, RpcResult)),
 
-    ServerError(String)
+    /// Subscrube to s_slot
+    Sub(Vec<u16>),
+    /// Unsubscribe from s_slot
+    UnSub(Vec<u16>),
+
+    ServerError(String),
+    Hangup,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RpcRequest {
@@ -55,7 +59,7 @@ pub struct RpcRequest {
 pub enum RpcResult {
     None,
     Ok(Vec<u8>),
-    Err(Vec<u8>)
+    Err(Vec<u8>),
 }
 
 /// Represents an executing RPC Job
@@ -63,10 +67,8 @@ pub enum RpcResult {
 pub struct RPCTask {
     slot: u16,
     request: RpcRequest,
-    result: RpcResult
+    result: RpcResult,
 }
-
-
 
 pub struct Server {
     bind_addr: String,
@@ -79,7 +81,10 @@ impl Server {
         tracing::info!("listening on: {}", &self.bind_addr);
 
         while let Ok((stream, addr)) = listener.accept().await {
-            tracing::trace!(address = addr.to_string().as_str(), "accepted connection. spawning connection_handler");
+            tracing::trace!(
+                address = addr.to_string().as_str(),
+                "accepted connection. spawning connection_handler"
+            );
             tokio::spawn(connection_handler(stream, addr, self.executor.clone()));
         }
 
@@ -87,15 +92,38 @@ impl Server {
     }
 }
 
-async fn rpc_callback(c_slot: u16, s_slot: u16, notify: Arc<Notify>, transport: Transport, executor: BoxcarExecutor) {
+async fn rpc_callback(
+    c_slot: u16,
+    s_slot: u16,
+    notify: Arc<Notify>,
+    transport: Transport,
+    executor: BoxcarExecutor,
+) {
     notify.notified().await;
     let result = executor.get_rpc(s_slot).await;
     let message = BoxcarMessage::RpcRslt((s_slot, result.unwrap().result));
-    tracing::debug!(c_slot = c_slot, s_slot = s_slot, "sending {:?} to client", &message);
-    if let Err(err) = transport.send(Some(c_slot), bincode::serialize(&message).unwrap(), false).await {
-        tracing::error!(c_slot = c_slot, s_slot = s_slot, "unable to flush rpc callback message");
+    tracing::debug!(
+        c_slot = c_slot,
+        s_slot = s_slot,
+        "sending {:?} to client",
+        &message
+    );
+    if let Err(err) = transport
+        .send(Some(c_slot), bincode::serialize(&message).unwrap(), false)
+        .await
+    {
+        tracing::error!(
+            c_slot = c_slot,
+            s_slot = s_slot,
+            "unable to flush rpc callback message. {}",
+            err.to_string()
+        );
     } else {
-        tracing::trace!(c_slot = c_slot, s_slot = s_slot, "flushed rpc callback message")
+        tracing::trace!(
+            c_slot = c_slot,
+            s_slot = s_slot,
+            "flushed rpc callback message"
+        )
     }
 }
 
@@ -110,19 +138,35 @@ pub async fn connection_handler(stream: TcpStream, addr: SocketAddr, mut executo
             BoxcarMessage::RpcReq(req) => {
                 match executor.execute_task(req).await {
                     Ok((s_slot, notify)) => {
-                        tracing::debug!(address = addr.as_str(), c_slot = message.c_slot, s_slot = s_slot, "successfully scheduled rpc");
-
-
+                        tracing::debug!(
+                            address = addr.as_str(),
+                            c_slot = message.c_slot,
+                            s_slot = s_slot,
+                            "successfully scheduled rpc"
+                        );
                         match executor.get_rpc(s_slot).await {
-                            None => panic!("just spawned a task, but executor does not contain the task info"),
+                            None => panic!(
+                                "just spawned a task, but executor does not contain the task info"
+                            ),
                             Some(inner) => {
                                 // check the outgoing response. there miiiight be a chance where the RPC could complete
                                 // by the time we get here. so, check the result to see if it is BoxcarResult::None
                                 match &inner.result {
                                     RpcResult::None => {
-                                        tracing::debug!(address = addr.as_str(), c_slot = message.c_slot, s_slot = s_slot, "spawning notify handler for rpc callback");
-                                        tokio::task::spawn(rpc_callback(message.c_slot, s_slot, notify, transport.clone(), executor.clone()));
-                                    },
+                                        tracing::debug!(
+                                            address = addr.as_str(),
+                                            c_slot = message.c_slot,
+                                            s_slot = s_slot,
+                                            "spawning notify handler for rpc callback"
+                                        );
+                                        tokio::task::spawn(rpc_callback(
+                                            message.c_slot,
+                                            s_slot,
+                                            notify,
+                                            transport.clone(),
+                                            executor.clone(),
+                                        ));
+                                    }
                                     _ => {
                                         // yep, the task finished in-between when it was scheduled and we are building the response to the client
                                         // in this case, we don't need to schedule the callback handler
@@ -132,27 +176,39 @@ pub async fn connection_handler(stream: TcpStream, addr: SocketAddr, mut executo
                                 BoxcarMessage::RpcRslt((s_slot, inner.result))
                             }
                         }
-
-
-
                     }
                     Err(err) => {
                         tracing::warn!("unable to execute rpc. {:?}", &err);
                         BoxcarMessage::ServerError(format!("unable to execute rpc. {:?}", err))
                     }
                 }
-
             }
-            BoxcarMessage::RpcRslt(_) => BoxcarMessage::ServerError("server got unexpected message".to_string()),
-            _ => todo!()
+            BoxcarMessage::RpcRslt(_) => {
+                BoxcarMessage::ServerError("server got unexpected message".to_string())
+            }
+            _ => todo!(),
         };
 
-        match transport.send(Some(message.c_slot), bincode::serialize(&response).unwrap(), false).await {
-            Ok(slot) => tracing::trace!(client = addr.as_str(), "successfully sent response to c_slot {}", slot),
-            Err(err) => tracing::error!(client = addr.as_str(), "unable to send response. error: {:?}", err)
+        match transport
+            .send(
+                Some(message.c_slot),
+                bincode::serialize(&response).unwrap(),
+                false,
+            )
+            .await
+        {
+            Ok(slot) => tracing::trace!(
+                client = addr.as_str(),
+                "successfully sent response to c_slot {}",
+                slot
+            ),
+            Err(err) => tracing::error!(
+                client = addr.as_str(),
+                "unable to send response. error: {:?}",
+                err
+            ),
         }
-
-    };
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -160,13 +216,16 @@ pub struct Session {
     c_slot: u16,
     transport: Transport,
     inbox: Arc<Queue<BoxcarMessage>>,
-    notify: Arc<Notify>
+    notify: Arc<Notify>,
 }
 impl Session {
     pub async fn call(&self, req: RpcRequest) -> anyhow::Result<()> {
         let message = BoxcarMessage::RpcReq(req);
         // tracing::debug!(c_slot = self.c_slot, "{:?}", &message);
-        let _q = self.transport.send(Some(self.c_slot), bincode::serialize(&message)?, false).await;
+        let _q = self
+            .transport
+            .send(Some(self.c_slot), bincode::serialize(&message)?, false)
+            .await;
         Ok(())
     }
 
@@ -196,7 +255,7 @@ impl Session {
 #[derive(Clone, Debug)]
 pub struct Client {
     sessions: Arc<RwLock<Vec<Session>>>,
-    transport: Transport
+    transport: Transport,
 }
 impl Client {
     pub async fn new(addr: &str) -> Self {
@@ -221,14 +280,18 @@ impl Client {
                 let decoded = bincode::deserialize(&message.inner);
                 let inner = handle.unwrap();
                 let msg = decoded.unwrap();
-                tracing::trace!(c_slot = c_slot, "delivering message to session inbox. {:?}", &msg);
+                tracing::trace!(
+                    c_slot = c_slot,
+                    "delivering message to session inbox. {:?}",
+                    &msg
+                );
                 inner.deliver(msg).await;
             }
         });
 
         Self {
             sessions,
-            transport
+            transport,
         }
     }
 
@@ -237,22 +300,31 @@ impl Client {
             c_slot: self.transport.allocate_slot().await,
             transport: self.transport.clone(),
             inbox: Arc::new(Queue::new(32)),
-            notify: Arc::new(Default::default())
+            notify: Arc::new(Default::default()),
         };
         self.sessions.write().await.push(session.clone());
         session
+    }
+
+    pub async fn close(&self) -> anyhow::Result<()> {
+        todo!()
+    }
+}
+impl Drop for Client {
+    fn drop(&mut self) {
+        let _ = self.close();
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crate::{BoxcarExecutor, Client, HandlerTrait, RpcRequest, RpcResult, Server};
+    use async_trait::async_trait;
     use std::sync::Arc;
     use std::time::Duration;
-    use async_trait::async_trait;
     use tokio::time::sleep;
-    use crate::{BoxcarExecutor, Client, HandlerTrait, RpcRequest, RpcResult, Server};
 
-    struct TestHandler { }
+    struct TestHandler {}
     #[async_trait]
     impl HandlerTrait for TestHandler {
         async fn call(&self, _method: &str, _arguments: Vec<u8>) -> RpcResult {
@@ -277,12 +349,11 @@ mod tests {
             slots: Arc::new(Default::default()),
             subscriber_map: Default::default(),
             handlers: Default::default(),
-            tasks: Default::default()
+            tasks: Default::default(),
         };
         executor.add_handler(Box::new(test_handler)).await;
 
         assert_eq!(1, executor.num_handlers().await)
-
     }
 
     #[tokio::test]
@@ -293,14 +364,14 @@ mod tests {
             slots: Arc::new(Default::default()),
             subscriber_map: Default::default(),
             handlers: Default::default(),
-            tasks: Default::default()
+            tasks: Default::default(),
         };
         executor.add_handler(Box::new(test_handler)).await;
 
         let task = RpcRequest {
             method: "foo".to_string(),
             body: vec![],
-            delay: false
+            delay: false,
         };
         let req = executor.execute_task(task).await;
         assert_eq!(req.is_ok(), true);
@@ -316,12 +387,14 @@ mod tests {
             RpcResult::Ok(inner) => {
                 let v: Vec<u8> = vec![];
                 assert_eq!(*inner, v);
-            },
+            }
         }
     }
 
     #[tokio::test]
     async fn test_delayed_execution() {
+        tracing_subscriber::fmt::init();
+
         // create a server
         let test_handler = TestHandler {};
         let mut executor = BoxcarExecutor::new();
@@ -329,7 +402,7 @@ mod tests {
 
         let server = Server {
             bind_addr: "127.0.0.1:9002".to_string(),
-            executor
+            executor,
         };
         // spawn server
         tokio::task::spawn(async move {
@@ -346,11 +419,13 @@ mod tests {
         sleep(Duration::from_secs(1)).await;
 
         let mut session = client.session().await;
-        let _ = session.call(RpcRequest {
-            method: "foo".to_string(),
-            body: vec![],
-            delay: false
-        }).await;
+        let _ = session
+            .call(RpcRequest {
+                method: "foo".to_string(),
+                body: vec![],
+                delay: false,
+            })
+            .await;
 
         sleep(Duration::from_micros(120)).await;
         let result = session.try_recv().await;
@@ -360,5 +435,4 @@ mod tests {
         let result = session.try_recv().await;
         assert_eq!(result.is_none(), false);
     }
-
 }

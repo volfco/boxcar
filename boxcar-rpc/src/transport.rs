@@ -1,16 +1,16 @@
-use std::net::SocketAddr;
-use std::sync::Arc;
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
-use tracing::instrument;
+use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::{mpsc, Notify};
 use tokio::sync::RwLock;
+use tokio::sync::{mpsc, Notify};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
+use tracing::instrument;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 use deadqueue::limited::Queue;
 
@@ -19,7 +19,7 @@ use deadqueue::limited::Queue;
 pub struct WireMessage {
     pub c_slot: u16,
     pub subscribe: bool,
-    pub inner: Vec<u8>
+    pub inner: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]
@@ -34,17 +34,14 @@ pub struct Transport {
     /// TODO Make sure on drop of a session, the c_slot is freed
     c_slots: Arc<RwLock<Vec<u16>>>,
 
-    flush: Arc<Notify>
+    flush: Arc<Notify>,
 }
 impl Transport {
     pub async fn client<R: IntoClientRequest + Send + Unpin>(
-        req: R
+        req: R,
     ) -> Result<Transport, tokio_tungstenite::tungstenite::Error> {
         let s = tokio_tungstenite::connect_async(req).await?;
-        Transport::build(
-            s.0,
-            SocketAddr::new("127.0.0.1".parse().unwrap(), 0),
-        ).await
+        Transport::build(s.0, SocketAddr::new("127.0.0.1".parse().unwrap(), 0)).await
     }
 
     /// Build a Server endpoint
@@ -52,14 +49,14 @@ impl Transport {
         stream: S,
         addr: SocketAddr,
     ) -> Result<Transport, tokio_tungstenite::tungstenite::Error> {
-        Transport::build(
-            tokio_tungstenite::accept_async(stream).await?,
-            addr
-        ).await
+        Transport::build(tokio_tungstenite::accept_async(stream).await?, addr).await
     }
 
     /// Build the Endpoint. Establish channels and tasks to handle messages
-    async fn build<W: AsyncRead + AsyncWrite + Unpin + Send + 'static>(ws: WebSocketStream<W>, addr: SocketAddr) -> Result<Self, tokio_tungstenite::tungstenite::Error> {
+    async fn build<W: AsyncRead + AsyncWrite + Unpin + Send + 'static>(
+        ws: WebSocketStream<W>,
+        addr: SocketAddr,
+    ) -> Result<Self, tokio_tungstenite::tungstenite::Error> {
         let addr = addr.to_string();
         tracing::debug!(client = addr.as_str(), "building transport for client");
         let (mut ws_tx, mut ws_rx) = ws.split();
@@ -78,13 +75,31 @@ impl Transport {
         tokio::spawn(async move {
             // handle each message in the mpsc channel
             while let Some(wire_message) = tx.recv().await {
-                tracing::trace!(client = addr2.as_str(), "outgoing message: {:?}", &wire_message);
+                tracing::trace!(
+                    client = addr2.as_str(),
+                    "outgoing message: {:?}",
+                    &wire_message
+                );
                 // send the message out over the socket
-                let raw =  bincode::serialize(&wire_message).unwrap();
-                tracing::debug!(client = addr2.as_str(), "successfully decoded message: {:?}", &raw);
-                match ws_tx.send(tokio_tungstenite::tungstenite::Message::Binary(raw)).await {
-                    Ok(_) => tracing::trace!(client = addr2.as_str(), "successfully flushed message to socket"),
-                    Err(err) => tracing::error!(client = addr2.as_str(), "unable to flush message to socket. {:?}", err),
+                let raw = bincode::serialize(&wire_message).unwrap();
+                tracing::debug!(
+                    client = addr2.as_str(),
+                    "successfully decoded message: {:?}",
+                    &raw
+                );
+                match ws_tx
+                    .send(tokio_tungstenite::tungstenite::Message::Binary(raw))
+                    .await
+                {
+                    Ok(_) => tracing::trace!(
+                        client = addr2.as_str(),
+                        "successfully flushed message to socket"
+                    ),
+                    Err(err) => tracing::error!(
+                        client = addr2.as_str(),
+                        "unable to flush message to socket. {:?}",
+                        err
+                    ),
                 };
                 worker_flush.notify_one();
             }
@@ -97,21 +112,37 @@ impl Transport {
             while let Some(msg) = ws_rx.next().await {
                 match msg {
                     Ok(packet) => {
-                        tracing::trace!(client = addr.as_str(), "received message from client. {:?}", packet);
+                        tracing::trace!(
+                            client = addr.as_str(),
+                            "received message from client. {:?}",
+                            packet
+                        );
                         match packet {
                             Message::Binary(raw) => {
                                 match rxa.try_push(bincode::deserialize(&raw[..]).unwrap()) {
-                                    Ok(_) => tracing::trace!(client = addr.as_str(), "flushed wire message to consumer queue"),
-                                    Err(_) => tracing::error!(client = addr.as_str(), "unable to flush message to consumer queue")
+                                    Ok(_) => tracing::trace!(
+                                        client = addr.as_str(),
+                                        "flushed wire message to consumer queue"
+                                    ),
+                                    Err(_) => tracing::error!(
+                                        client = addr.as_str(),
+                                        "unable to flush message to consumer queue"
+                                    ),
                                 }
                             }
-                            Message::Text(_) | Message::Pong(_) | Message::Ping(_) |Message::Close(_) => {
-                                tracing::warn!(client = addr.as_str(), "got message with non-binary data. ignoring");
+                            _ => {
+                                tracing::warn!(
+                                    client = addr.as_str(),
+                                    "got message with non-binary data. ignoring"
+                                );
                                 continue;
                             }
                         }
-                    },
-                    Err(_err) => {}
+                    }
+                    Err(err) => {
+                        tracing::warn!("client comm error. {:?}. assuming client closed", err);
+                        // rxa.try_push(BoxcarMessage::Hangup);
+                    }
                 }
             }
         });
@@ -120,7 +151,7 @@ impl Transport {
             outbox,
             rx: rx_queue,
             c_slots: Arc::new(Default::default()),
-            flush
+            flush,
         })
     }
 
@@ -146,13 +177,24 @@ impl Transport {
 
     #[instrument]
     /// Place a message in the outbox, and return the c_slot
-    pub async fn send(&self, c_slot: Option<u16>, inner: Vec<u8>, subscribe: bool) -> Result<u16, mpsc::error::SendError<WireMessage>> {
+    pub async fn send(
+        &self,
+        c_slot: Option<u16>,
+        inner: Vec<u8>,
+        subscribe: bool,
+    ) -> Result<u16, mpsc::error::SendError<WireMessage>> {
         let c_slot = match c_slot {
             None => self.allocate_slot().await,
-            Some(slot) => slot
+            Some(slot) => slot,
         };
 
-        self.outbox.send(WireMessage { c_slot, subscribe, inner  }).await?;
+        self.outbox
+            .send(WireMessage {
+                c_slot,
+                subscribe,
+                inner,
+            })
+            .await?;
 
         Ok(c_slot)
     }
