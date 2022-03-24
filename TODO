@@ -1,11 +1,15 @@
-- [ ] Once an RPC is finished, the message needs to be sent to all clients who are subscribed
-  - [ ] Track subscribers
+- [+] Once an RPC is finished, the message needs to be sent to all clients who are subscribed
+  - [+] Track subscribers
     - [+] clients are automatically subscribed to all tasks they create - done via an async task that blocks on the task notify
     - [ ] clients are un-subscribe on connection close - async task that blocks on notify could also be used to loop over subscribers
   - [ ] Add method to subscribe to slot
+  - [ ] Add method to un-subscribe to slot
 - [ ] Support streaming of messages from task to client. Pass a queue to the handle method, which will forward messages
       - might make sense to re-factor the notification method so both are handled by one thing.
         RpcResult::Some(Vec<u8>) maybe? Only close the task once the shutdown notify has been triggered?
+- [ ] Make sure that RPCs to an in-use session are rejected
+- [ ] Add way to expose 'internal' data to RPC Method Handler
+
 
 - garbage collect results after X unit of time.
   - time based?

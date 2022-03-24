@@ -1,4 +1,5 @@
 [workspace]
 members = [
-    "boxcar-rpc"
+    "boxcar-rpc",
+    "boxcar-service"
 ]
