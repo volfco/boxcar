@@ -176,8 +176,8 @@ async fn message_handler(
             rsp
         }
         BoxcarMessage::RpcRslt(_) => todo!(),
-        BoxcarMessage::Sub(_) => todo!(),
-        BoxcarMessage::UnSub(_) => todo!(),
+        BoxcarMessage::Sub(slots) => handle_sub(slots, subscribed.clone(), message.c_slot).await,
+        BoxcarMessage::UnSub(slots) => handle_unsub(slots, subscribed.clone()).await,
         BoxcarMessage::Hangup => todo!(),
         BoxcarMessage::Ping(num) => handle_ping(num).await,
         BoxcarMessage::Pong(_) => {
@@ -193,6 +193,53 @@ async fn message_handler(
         c_slot: message.c_slot,
         inner: utils::encode(response).unwrap(),
     }
+}
+
+#[instrument]
+async fn handle_sub(
+    slots: Vec<u16>,
+    subscribed: Arc<RwLock<BTreeMap<u16, u16>>>,
+    c_slot: u16,
+) -> BoxcarMessage {
+    tracing::trace!("getting write handle on client subscriber map");
+    let mut handle = subscribed.write().await;
+    tracing::trace!("acquired write handle");
+
+    let mut changed = false;
+    for slot in slots {
+        if handle.contains_key(&slot) {
+            tracing::trace!(s_slot = slot, "slot is already mapped for client")
+        } else {
+            changed = true;
+            handle.insert(slot, c_slot.clone());
+            tracing::debug!(s_slot = slot, "subscribed client to slot");
+        }
+    }
+
+    BoxcarMessage::SubOpFin(changed)
+}
+
+#[instrument]
+async fn handle_unsub(
+    slots: Vec<u16>,
+    subscribed: Arc<RwLock<BTreeMap<u16, u16>>>,
+) -> BoxcarMessage {
+    tracing::trace!("getting write handle on client subscriber map");
+    let mut handle = subscribed.write().await;
+    tracing::trace!("acquired write handle");
+
+    let mut changed = false;
+    for slot in slots {
+        if handle.contains_key(&slot) {
+            changed = true;
+            handle.remove(&slot);
+            tracing::debug!(s_slot = slot, "unsubscribed client from slot")
+        } else {
+            tracing::trace!(s_slot = slot, "client not subscribed to slot");
+        }
+    }
+
+    BoxcarMessage::SubOpFin(changed)
 }
 
 /// Respond to a ping with a pong
