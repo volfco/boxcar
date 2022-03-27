@@ -37,7 +37,8 @@ impl Debug for Server {
 ///
 /// c_slot 0 is reserved for unsolicited communication
 #[instrument]
-async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: BoxcarExecutor) {
+async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: BoxcarExecutor) {
+    let addr = addr.to_string();
     let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
     let (mut ws_tx, mut ws_rx) = ws.split();
 
@@ -73,6 +74,7 @@ async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: Boxc
         }
     });
 
+    let caddr = addr.clone();
     tokio::spawn(async move {
         while let Some((message, notify)) = outbox_rx.recv().await {
             match utils::encode(message) {
@@ -81,14 +83,27 @@ async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: Boxc
                         .send(tokio_tungstenite::tungstenite::Message::Binary(raw))
                         .await
                     {
-                        Ok(_) => tracing::trace!("successfully wrote message to socket"),
-                        Err(err) => tracing::error!("unable to flush message to socket. {:?}", err),
+                        Ok(_) => {
+                            tracing::trace!(
+                                client = caddr.as_str(),
+                                "successfully wrote message to socket"
+                            )
+                        }
+                        Err(err) => tracing::error!(
+                            client = caddr.as_str(),
+                            "unable to flush message to socket due to error: {:?}",
+                            err
+                        ),
                     };
                     if let Some(notif) = notify {
                         notif.notify_one();
                     }
                 }
-                Err(err) => tracing::error!("unable to encode message. {:?}", err),
+                Err(err) => tracing::error!(
+                    client = caddr.as_str(),
+                    "unable to encode message. {:?}",
+                    err
+                ),
             }
         }
     });
@@ -100,8 +115,13 @@ async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: Boxc
                 let outbound_chan = outbox_tx.clone();
                 let task_exec = executor.clone();
                 let task_subcribed = subcribed.clone();
+                let caddr = addr.clone();
                 tokio::spawn(async move {
-                    tracing::trace!("received message from client. {:?}", &inner);
+                    tracing::trace!(
+                        client = caddr.as_str(),
+                        "received message from client. {:?}",
+                        &inner
+                    );
 
                     if let Message::Binary(raw) = inner {
                         let result = message_handler(
@@ -113,12 +133,19 @@ async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: Boxc
 
                         outbound_chan.send((result, None)).await;
                     } else {
-                        tracing::warn!("got message with non-binary data. ignoring");
+                        tracing::warn!(
+                            client = caddr.as_str(),
+                            "got message with non-binary data. ignoring"
+                        );
                     }
                 });
             }
             Err(error) => {
-                tracing::error!("unable to read message. {:?}", error);
+                tracing::error!(
+                    client = addr.as_str(),
+                    "unable to read message. {:?}",
+                    error
+                );
             }
         };
     }
