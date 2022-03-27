@@ -54,10 +54,12 @@ pub enum BoxcarMessage {
     /// RPC Status
     RpcRslt((u16, RpcResult)),
 
-    /// Subscrube to s_slot
+    /// Subscribe to the specified s_slot
     Sub(Vec<u16>),
-    /// Unsubscribe from s_slot
+    /// Unsubscribe from the specified s_slot
     UnSub(Vec<u16>),
+    /// (un)subscribe operation success. bool indicates if the operation resulted in any changes
+    SubOpFin(bool),
 
     ServerError(String),
     Hangup,
