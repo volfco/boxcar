@@ -4,10 +4,11 @@ use deadqueue::unlimited::Queue;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use rand::Rng;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, Notify, RwLock};
+use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tracing::instrument;
@@ -20,7 +21,7 @@ async fn inbox_handler(
     inbox: Inbox,
 ) {
     while let Some(message) = rx.next().await {
-        tracing::trace!("received message");
+        tracing::trace!("received message from websocket");
 
         if let Ok(raw_message) = message {
             if let Message::Binary(raw) = raw_message {
@@ -28,7 +29,7 @@ async fn inbox_handler(
 
                 tracing::trace!("waiting for inbox write guard");
                 let queue_guard = inbox.write().await;
-                tracing::trace!("acquired write guard");
+                tracing::trace!("acquired inbox write guard");
 
                 if let Some(queue) = queue_guard.get(&message.c_slot) {
                     let msg = utils::decode(&message.inner[..]).unwrap();
@@ -40,6 +41,11 @@ async fn inbox_handler(
                         "c_slot is not present. it might have been dropped. ignoring packet"
                     );
                 }
+
+                // explicitly drop the guard. it seems that it won't be implicitly dropped at
+                // the end of the code path
+                drop(queue_guard);
+                tracing::trace!("dropped inbox write guard");
             } else {
                 tracing::warn!("received unexpected websocket data type");
             }
@@ -71,6 +77,8 @@ pub struct Client {
     /// c_slots are used for request-response requests
     outbox: mpsc::Sender<(WireMessage, Option<Arc<Notify>>)>,
     inbox: Inbox,
+    slot_map: Arc<RwLock<HashMap<u16, u16>>>,
+    handles: Arc<Vec<JoinHandle<()>>>,
 }
 impl Client {
     #[instrument]
@@ -82,15 +90,26 @@ impl Client {
         let (outbox, outbox_rx) = mpsc::channel(1);
 
         let inbox: Inbox = Arc::new(Default::default());
+        let slot_map = Arc::new(Default::default());
 
         let task_inbox = inbox.clone();
         // TODO can this be replaced by future_utils::pin_mut ?
-        tokio::task::spawn(async move { inbox_handler(rx, task_inbox).await });
-        tokio::task::spawn(async move { outbox_handler(tx, outbox_rx).await });
+        let mut handles = Vec::new();
+        handles.push(tokio::task::spawn(async move {
+            inbox_handler(rx, task_inbox).await
+        }));
+        handles.push(tokio::task::spawn(async move {
+            outbox_handler(tx, outbox_rx).await
+        }));
 
         tracing::info!("finished setting up client");
 
-        Ok(Client { outbox, inbox })
+        Ok(Client {
+            outbox,
+            inbox,
+            slot_map,
+            handles: Arc::new(handles),
+        })
     }
 
     #[instrument]
@@ -98,11 +117,16 @@ impl Client {
         let mut depth = 0;
 
         loop {
-            let mut slots = self.inbox.write().await;
             let slot: u16 = rand::thread_rng().gen();
-            if !slots.contains_key(&slot) {
-                tracing::trace!("slot {} is un-allocated, using", slot);
-                slots.insert(slot, Arc::new(Queue::new()));
+            tracing::trace!(c_slot = slot, "accusing write handle for inbox");
+            let mut slots = self.inbox.write().await;
+            if let std::collections::btree_map::Entry::Vacant(e) = slots.entry(slot) {
+                tracing::trace!(c_slot = slot, "slot {} is un-allocated, using", slot);
+                e.insert(Arc::new(Queue::new()));
+
+                drop(slots);
+                tracing::trace!(c_slot = slot, "dropped write handle for inbox");
+
                 return slot;
             }
             if depth > 1024 {
@@ -131,11 +155,14 @@ impl Client {
     }
 
     #[instrument]
-    pub async fn call(&self, inner: RpcRequest) -> anyhow::Result<DeferredResult> {
+    pub async fn call(&self, inner: RpcRequest) -> anyhow::Result<u16> {
         tracing::debug!("sending {:?} for execution", &inner);
         let c_slot = self.send(BoxcarMessage::RpcReq(inner)).await?;
 
+        tracing::trace!("acquiring write lock on inbox");
         let inbox_handle = self.inbox.read().await;
+        tracing::trace!("acquired on write lock on inbox");
+
         let queue_slot = inbox_handle.get(&c_slot);
         if queue_slot.is_none() {
             bail!("slot does not exist")
@@ -143,39 +170,111 @@ impl Client {
 
         let queue = queue_slot.unwrap().clone();
         drop(inbox_handle);
+        tracing::trace!("dropped write lock on inbox");
 
         match queue.pop().await {
-            BoxcarMessage::RpcReqSlot(_) => Ok(DeferredResult::new(queue.clone())),
+            BoxcarMessage::RpcReqSlot(s_slot) => {
+                self.slot_map.write().await.insert(s_slot, c_slot);
+                tracing::trace!(
+                    s_slot = s_slot,
+                    c_slot = c_slot,
+                    "recording s_slot => c_slot mapping"
+                );
+                Ok(s_slot)
+            }
             BoxcarMessage::ServerError(err) => bail!("server returned error. {}", err),
             _ => bail!("unexpected server response"),
         }
     }
-}
 
-#[derive(Debug)]
-pub struct DeferredResult {
-    inbox: Arc<Queue<BoxcarMessage>>,
+    /// Close the client.
+    ///
+    /// 1. Un-subscribe from all slots
+    /// 2. Notify the server we're shutting down
+    /// 3. Shutdown
+    #[instrument]
+    pub async fn close(self) {
+        let slots = self.slot_map.read().await;
+        tracing::trace!("client is tracking {} slots before close", &slots.len());
+
+        let message = BoxcarMessage::UnSub(slots.keys().cloned().collect::<Vec<u16>>());
+
+        match self.send(message).await {
+            Ok(_) => tracing::trace!("successfully sent unsubscribe command"),
+            Err(err) => tracing::error!("unable to unsubscribe from server. {:?}", err),
+        };
+
+        // TODO should we shutdown self.outbox?
+
+        for handle in self.handles.iter() {
+            handle.abort();
+        }
+    }
+
+    /// Return the expected c_slot given a (possibly subscribed) s_slot
+    #[instrument]
+    async fn get_c_slot(&self, s_slot: u16) -> Option<u16> {
+        tracing::trace!(s_slot = s_slot, "attempting to get read handle on slot_map");
+        let handle = self.slot_map.read().await;
+        tracing::trace!(s_slot = s_slot, "acquired read handle on slot_map");
+
+        let val = handle.get(&s_slot).copied();
+        drop(handle);
+        tracing::trace!(s_slot = s_slot, "dropped read handle on slot_map");
+
+        val
+    }
+
+    #[instrument]
+    pub async fn try_recv(&self, s_slot: u16) -> anyhow::Result<Option<BoxcarMessage>> {
+        if let Some(slot) = self.get_c_slot(s_slot).await {
+            let handle = self.inbox.read().await;
+            if let Some(queue) = handle.get(&slot) {
+                // // clone the queue, so we can drop the read handle.
+                // // if it's not dropped, then this can block everything else.
+                let q = queue.clone();
+                // drop(handle);
+                // TODO I don't think we need ^^ ?
+                return Ok(q.try_pop());
+            }
+        }
+
+        bail!("s_slot not subscribed to")
+    }
+
+    #[instrument]
+    pub async fn recv(&self, s_slot: u16) -> anyhow::Result<BoxcarMessage> {
+        if let Some(slot) = self.get_c_slot(s_slot).await {
+            let handle = self.inbox.read().await;
+            if let Some(queue) = handle.get(&slot) {
+                // clone the queue, so we can drop the read handle.
+                // if it's not dropped, then this can block everything else.
+                let q = queue.clone();
+                drop(handle);
+
+                return Ok(q.pop().await);
+            }
+        }
+
+        bail!("s_slot not subscribed to")
+    }
+
+    #[instrument]
+    pub async fn subscribe(&self, s_slot: u16) -> anyhow::Result<()> {
+        todo!()
+    }
+
+    #[instrument]
+    pub async fn unsubscribe(&self, s_slot: u16) -> anyhow::Result<()> {
+        todo!()
+    }
 }
-impl DeferredResult {
-    pub fn new(inbox: Arc<Queue<BoxcarMessage>>) -> Self {
-        Self { inbox }
-    }
-    pub async fn recv(&self) -> BoxcarMessage {
-        self.inbox.pop().await
-    }
-    pub async fn try_recv(&self) -> Option<BoxcarMessage> {
-        self.inbox.try_pop()
-    }
-}
-// TODO on drop, this should
-//    1. tell the server to drop the subscriber
-//    2. destroy the c_slot entry in the btreemap
 
 #[cfg(test)]
 mod tests {
     use crate::client::Client;
     use crate::server::Server;
-    use crate::{BoxcarExecutor, BoxcarMessage, BusWrapper, HandlerTrait, RpcResult, WireMessage};
+    use crate::{BoxcarExecutor, BoxcarMessage, BusWrapper, HandlerTrait, RpcResult};
     use async_trait::async_trait;
     use std::time::Duration;
     use tokio::net::TcpListener;

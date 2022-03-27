@@ -1,11 +1,13 @@
 use crate::{utils, BoxcarExecutor, BoxcarMessage, RpcRequest, WireMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
+use tracing::instrument;
 
 pub struct Server {
     listener: TcpListener,
@@ -15,6 +17,7 @@ impl Server {
     pub fn new(listener: TcpListener, executor: BoxcarExecutor) -> Self {
         Server { listener, executor }
     }
+    #[instrument]
     pub async fn serve(&self) {
         while let Ok((stream, addr)) = self.listener.accept().await {
             tracing::trace!(
@@ -25,9 +28,15 @@ impl Server {
         }
     }
 }
+impl Debug for Server {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self.listener)
+    }
+}
 
 ///
 /// c_slot 0 is reserved for unsolicited communication
+#[instrument]
 async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: BoxcarExecutor) {
     let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
     let (mut ws_tx, mut ws_rx) = ws.split();
@@ -115,6 +124,7 @@ async fn connection_handler(stream: TcpStream, _addr: SocketAddr, executor: Boxc
     }
 }
 
+#[instrument]
 async fn message_handler(
     message: WireMessage,
     executor: BoxcarExecutor,
@@ -159,10 +169,12 @@ async fn message_handler(
 }
 
 /// Respond to a ping with a pong
+#[instrument]
 async fn handle_ping(num: u8) -> BoxcarMessage {
     BoxcarMessage::Pong(num)
 }
 
+#[instrument]
 async fn handle_rpc_req(req: RpcRequest, mut executor: BoxcarExecutor) -> BoxcarMessage {
     match executor.execute_task(req).await {
         Ok(s_slot) => BoxcarMessage::RpcReqSlot(s_slot),
@@ -202,8 +214,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_basic_ping_pong() {
-        // tracing_subscriber::fmt::init();
-
         let test_handler = TestHandler {};
 
         let mut executor = BoxcarExecutor::new();

@@ -1,18 +1,20 @@
+use crate::{Handler, RPCTask, RpcRequest, RpcResult};
+use anyhow::bail;
 use rand::Rng;
 use std::collections::BTreeMap;
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-use tokio::sync::RwLock;
-
-use anyhow::bail;
-
-use crate::{Handler, RPCTask, RpcRequest, RpcResult};
 use tokio::sync::broadcast;
+use tokio::sync::RwLock;
+use tracing::instrument;
 
+#[derive(Debug)]
 pub struct BusWrapper {
     bus: broadcast::Sender<(u16, RpcResult)>,
     s_slot: u16,
 }
 impl BusWrapper {
+    #[instrument]
     pub fn send(
         &self,
         message: RpcResult,
@@ -34,6 +36,7 @@ pub struct BoxcarExecutor {
     pub(crate) bus: broadcast::Sender<(u16, RpcResult)>,
 }
 impl BoxcarExecutor {
+    #[instrument]
     pub fn new() -> Self {
         let bus: (broadcast::Sender<BoxcarBus>, broadcast::Receiver<BoxcarBus>) =
             broadcast::channel(32);
@@ -80,6 +83,7 @@ impl BoxcarExecutor {
     }
 
     /// Return the number of registered handlers
+    #[instrument]
     pub async fn num_handlers(&self) -> usize {
         self.handlers.read().await.len()
     }
@@ -91,6 +95,7 @@ impl BoxcarExecutor {
     //     }
     // }
 
+    #[instrument]
     async fn assign_slot(&mut self) -> u16 {
         let mut depth = 0;
 
@@ -111,10 +116,12 @@ impl BoxcarExecutor {
     }
 
     /// Return a listener on the bus
+    #[instrument]
     pub fn get_listener(&self) -> broadcast::Receiver<(u16, RpcResult)> {
         self.bus.subscribe()
     }
 
+    #[instrument]
     pub async fn execute_task(&mut self, request: RpcRequest) -> anyhow::Result<u16> {
         let s_slot = self.assign_slot().await;
         let task = RPCTask {
@@ -197,5 +204,10 @@ impl BoxcarExecutor {
 impl Default for BoxcarExecutor {
     fn default() -> Self {
         Self::new()
+    }
+}
+impl std::fmt::Debug for BoxcarExecutor {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "todo",)
     }
 }
