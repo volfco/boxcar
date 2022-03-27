@@ -96,14 +96,34 @@ mod tests {
             body: vec![],
             subscribe: true,
         };
+
+        print!("executing {:?}", &command);
+
         let r = client.call(command).await;
         assert_eq!(r.is_ok(), true);
 
         let s_slot = r.unwrap();
 
+        // this should consume the client as well
+        tracing::info!("closing client");
         client.close().await;
 
-        //
+        sleep(Duration::from_secs(1)).await;
+
+        print!("opening a new client");
+        let new_client = Client::new("ws://127.0.0.1:9934").await.unwrap();
+
+        let subscribed_slots = new_client.get_subscribed().await;
+        assert_eq!(subscribed_slots.len(), 0);
+
+        print!("attempting to subscribe to the old s_slot");
+
+        let sub_req = new_client.subscribe(s_slot).await;
+        assert_eq!(sub_req.is_ok(), true);
+
+        let subscribed_slots = new_client.get_subscribed().await;
+        assert_eq!(subscribed_slots.len(), 1);
+
         // sleep(Duration::from_secs(5)).await;
         // println!("{:?}", result.try_recv().await)
     }

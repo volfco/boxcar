@@ -72,12 +72,33 @@ async fn outbox_handler(
     }
 }
 
+/// c_slot identifier, that will remove itsself from the slot_map on drop
+#[derive(Clone, Debug)]
+struct CSlot {
+    c_slot: u16,
+    slot_map: Arc<RwLock<HashMap<u16, CSlot>>>,
+}
+impl Drop for CSlot {
+    #[instrument]
+    fn drop(&mut self) {
+        let c_slot = self.c_slot.clone();
+        let map = self.slot_map.clone();
+        tokio::task::spawn(async move {
+            tracing::trace!(c_slot = c_slot, "CSlot dropped, cleaning up");
+            let mut handle = map.write().await;
+            handle.remove(&c_slot);
+
+            tracing::trace!(c_slot = c_slot, "CSlot dropped- drop finished");
+        });
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Client {
     /// c_slots are used for request-response requests
     outbox: mpsc::Sender<(WireMessage, Option<Arc<Notify>>)>,
     inbox: Inbox,
-    slot_map: Arc<RwLock<HashMap<u16, u16>>>,
+    slot_map: Arc<RwLock<HashMap<u16, CSlot>>>,
     handles: Arc<Vec<JoinHandle<()>>>,
 }
 impl Client {
@@ -137,9 +158,21 @@ impl Client {
         }
     }
 
-    /// Send a BoxcarMessage, returning the expected c_slot where the response (might) be
+    // Send a BoxcarMessage, returning the expected c_slot where the response (might) be
+    //
+    // Minimal Example
+    // ```
+    //  use boxcar_rpc::BoxcarMessage;
+    //
+    //  let c_slot = self.send(BoxcarMessage::RpcReq(inner)).await?;
+    //  let inbox_handle = self.inbox.read().await;
+    //  let queue_slot = inbox_handle.get(&c_slot);
+    //  let queue = queue_slot.unwrap().clone();
+    //  drop(inbox_handle);
+    //  let response =  queue.pop().await?;
+    // ```
     #[instrument]
-    async fn send(&self, message: BoxcarMessage) -> anyhow::Result<u16> {
+    async fn send(&self, message: BoxcarMessage) -> anyhow::Result<CSlot> {
         // allocate a slot, which is where we will get the response
         let c_slot = self.allocate_slot().await;
         let message = WireMessage {
@@ -151,7 +184,32 @@ impl Client {
 
         tracing::trace!("request sent. assigned slot {}", c_slot);
 
-        Ok(c_slot)
+        Ok(CSlot {
+            c_slot,
+            slot_map: self.slot_map.clone(),
+        })
+    }
+
+    /// Send a message to the server, waiting for- and returning, the response
+    #[instrument]
+    async fn send_wait(&self, message: BoxcarMessage) -> anyhow::Result<BoxcarMessage> {
+        // we're not, so tell the server to subscribe us
+        let c_slot = self.send(message).await?;
+
+        tracing::trace!("acquiring write lock on inbox");
+        let inbox_handle = self.inbox.read().await;
+        tracing::trace!("acquired on write lock on inbox");
+
+        let queue_slot = inbox_handle.get(&c_slot.c_slot);
+        if queue_slot.is_none() {
+            bail!("slot does not exist")
+        }
+
+        let queue = queue_slot.unwrap().clone();
+        drop(inbox_handle);
+        tracing::trace!("dropped write lock on inbox");
+
+        Ok(queue.pop().await)
     }
 
     #[instrument]
@@ -163,7 +221,7 @@ impl Client {
         let inbox_handle = self.inbox.read().await;
         tracing::trace!("acquired on write lock on inbox");
 
-        let queue_slot = inbox_handle.get(&c_slot);
+        let queue_slot = inbox_handle.get(&c_slot.c_slot);
         if queue_slot.is_none() {
             bail!("slot does not exist")
         }
@@ -174,10 +232,10 @@ impl Client {
 
         match queue.pop().await {
             BoxcarMessage::RpcReqSlot(s_slot) => {
-                self.slot_map.write().await.insert(s_slot, c_slot);
+                self.slot_map.write().await.insert(s_slot, c_slot.clone());
                 tracing::trace!(
                     s_slot = s_slot,
-                    c_slot = c_slot,
+                    c_slot = &c_slot.c_slot,
                     "recording s_slot => c_slot mapping"
                 );
                 Ok(s_slot)
@@ -185,6 +243,91 @@ impl Client {
             BoxcarMessage::ServerError(err) => bail!("server returned error. {}", err),
             _ => bail!("unexpected server response"),
         }
+    }
+
+    /// Return the expected c_slot given a (possibly subscribed) s_slot
+    #[instrument]
+    async fn get_c_slot(&self, s_slot: u16) -> Option<CSlot> {
+        tracing::trace!(s_slot = s_slot, "attempting to get read handle on slot_map");
+        let handle = self.slot_map.read().await;
+        tracing::trace!(s_slot = s_slot, "acquired read handle on slot_map");
+
+        let val = handle.get(&s_slot).cloned();
+        drop(handle);
+        tracing::trace!(s_slot = s_slot, "dropped read handle on slot_map");
+
+        val
+    }
+
+    #[instrument]
+    pub async fn try_recv(&self, s_slot: u16) -> anyhow::Result<Option<BoxcarMessage>> {
+        if let Some(slot) = self.get_c_slot(s_slot).await {
+            let handle = self.inbox.read().await;
+            if let Some(queue) = handle.get(&slot.c_slot) {
+                // // clone the queue, so we can drop the read handle.
+                // // if it's not dropped, then this can block everything else.
+                let q = queue.clone();
+                // drop(handle);
+                // TODO I don't think we need ^^ ?
+                return Ok(q.try_pop());
+            }
+        }
+
+        bail!("s_slot not subscribed to")
+    }
+
+    #[instrument]
+    pub async fn recv(&self, s_slot: u16) -> anyhow::Result<BoxcarMessage> {
+        if let Some(slot) = self.get_c_slot(s_slot).await {
+            let handle = self.inbox.read().await;
+            if let Some(queue) = handle.get(&slot.c_slot) {
+                // clone the queue, so we can drop the read handle.
+                // if it's not dropped, then this can block everything else.
+                let q = queue.clone();
+                drop(handle);
+
+                return Ok(q.pop().await);
+            }
+        }
+
+        bail!("s_slot not subscribed to")
+    }
+
+    #[instrument]
+    pub async fn get_subscribed(&self) -> Vec<u16> {
+        let slots = self.slot_map.read().await;
+        slots.keys().cloned().collect::<Vec<u16>>()
+    }
+
+    #[instrument]
+    pub async fn subscribe(&self, s_slot: u16) -> anyhow::Result<()> {
+        // check if we're already subscribed
+        let slots = self.slot_map.read().await;
+        if slots.contains_key(&s_slot) {
+            tracing::trace!(s_slot = s_slot, "client already subscribed to slot");
+            return Ok(());
+        }
+
+        tracing::trace!(s_slot = s_slot, "subscribing to slot");
+
+        // we're not, so tell the server to subscribe us
+        let message = BoxcarMessage::Sub(vec![s_slot]);
+
+        if let BoxcarMessage::SubOpFin(change) = self.send_wait(message).await? {
+            tracing::trace!(
+                s_slot = s_slot,
+                change = change,
+                "subscription operation was successful"
+            );
+            Ok(())
+        } else {
+            bail!("server returned an unexpected response");
+        }
+    }
+
+    #[instrument]
+    pub async fn unsubscribe(&self, s_slot: u16) -> anyhow::Result<()> {
+        todo!()
     }
 
     /// Close the client.
@@ -209,64 +352,8 @@ impl Client {
         for handle in self.handles.iter() {
             handle.abort();
         }
-    }
 
-    /// Return the expected c_slot given a (possibly subscribed) s_slot
-    #[instrument]
-    async fn get_c_slot(&self, s_slot: u16) -> Option<u16> {
-        tracing::trace!(s_slot = s_slot, "attempting to get read handle on slot_map");
-        let handle = self.slot_map.read().await;
-        tracing::trace!(s_slot = s_slot, "acquired read handle on slot_map");
-
-        let val = handle.get(&s_slot).copied();
-        drop(handle);
-        tracing::trace!(s_slot = s_slot, "dropped read handle on slot_map");
-
-        val
-    }
-
-    #[instrument]
-    pub async fn try_recv(&self, s_slot: u16) -> anyhow::Result<Option<BoxcarMessage>> {
-        if let Some(slot) = self.get_c_slot(s_slot).await {
-            let handle = self.inbox.read().await;
-            if let Some(queue) = handle.get(&slot) {
-                // // clone the queue, so we can drop the read handle.
-                // // if it's not dropped, then this can block everything else.
-                let q = queue.clone();
-                // drop(handle);
-                // TODO I don't think we need ^^ ?
-                return Ok(q.try_pop());
-            }
-        }
-
-        bail!("s_slot not subscribed to")
-    }
-
-    #[instrument]
-    pub async fn recv(&self, s_slot: u16) -> anyhow::Result<BoxcarMessage> {
-        if let Some(slot) = self.get_c_slot(s_slot).await {
-            let handle = self.inbox.read().await;
-            if let Some(queue) = handle.get(&slot) {
-                // clone the queue, so we can drop the read handle.
-                // if it's not dropped, then this can block everything else.
-                let q = queue.clone();
-                drop(handle);
-
-                return Ok(q.pop().await);
-            }
-        }
-
-        bail!("s_slot not subscribed to")
-    }
-
-    #[instrument]
-    pub async fn subscribe(&self, s_slot: u16) -> anyhow::Result<()> {
-        todo!()
-    }
-
-    #[instrument]
-    pub async fn unsubscribe(&self, s_slot: u16) -> anyhow::Result<()> {
-        todo!()
+        tracing::debug!("client closed");
     }
 }
 
@@ -321,7 +408,7 @@ mod tests {
         let c_slot = call.unwrap();
 
         let queue_handle = client.inbox.read().await;
-        let queue = queue_handle.get(&c_slot);
+        let queue = queue_handle.get(&c_slot.c_slot);
         assert_eq!(queue.is_some(), true);
 
         let queue = queue.unwrap().clone();
