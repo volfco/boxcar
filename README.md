@@ -1,4 +1,4 @@
-**under active development**
+**under active development. no api stability until _0.2.0_!**
 
 Boxcar RPC is a framework that provides a fully asynchronous RPC interface. Or an attempt at once.
 
