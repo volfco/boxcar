@@ -49,7 +49,12 @@ pub enum BoxcarMessage {
     /// Initiate an RPC
     RpcReq(RpcRequest),
 
-    RpcReqSlot(u16),
+    /// RPC Request Result
+    /// When sent from the server -> client, signifies that the RpcReq was accepted and this is the
+    /// associated s_slot.
+    /// When sent from the Client to the Server, signifies that the client is requesting the last
+    /// Rpc Result
+    RpcReqRslt(u16),
 
     /// RPC Status
     RpcRslt((u16, RpcResult)),

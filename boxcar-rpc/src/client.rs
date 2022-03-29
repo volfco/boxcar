@@ -1,5 +1,5 @@
 use crate::{utils, BoxcarMessage, RpcRequest, WireMessage};
-use anyhow::bail;
+use anyhow::{bail, Context};
 use deadqueue::unlimited::Queue;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -192,7 +192,7 @@ impl Client {
 
     /// Send a message to the server, waiting for- and returning, the response
     #[instrument]
-    async fn send_wait(&self, message: BoxcarMessage) -> anyhow::Result<BoxcarMessage> {
+    async fn send_wait(&self, message: BoxcarMessage) -> anyhow::Result<(BoxcarMessage, CSlot)> {
         // we're not, so tell the server to subscribe us
         let c_slot = self.send(message).await?;
 
@@ -209,7 +209,7 @@ impl Client {
         drop(inbox_handle);
         tracing::trace!("dropped write lock on inbox");
 
-        Ok(queue.pop().await)
+        Ok((queue.pop().await, c_slot))
     }
 
     #[instrument]
@@ -231,7 +231,7 @@ impl Client {
         tracing::trace!("dropped write lock on inbox");
 
         match queue.pop().await {
-            BoxcarMessage::RpcReqSlot(s_slot) => {
+            BoxcarMessage::RpcReqRslt(s_slot) => {
                 self.slot_map.write().await.insert(s_slot, c_slot.clone());
                 tracing::trace!(
                     s_slot = s_slot,
@@ -293,12 +293,33 @@ impl Client {
         bail!("s_slot not subscribed to")
     }
 
+    /// Ask the server to send the last know task result
+    #[instrument]
+    pub async fn refresh(&self, s_slot: u16) -> anyhow::Result<()> {
+        tracing::trace!(s_slot = s_slot, "sending refresh command to server");
+        // build a raw message
+        let c_slot = self.get_c_slot(s_slot).await;
+        if c_slot.is_none() {
+            bail!("not subscribed")
+        }
+
+        let message = WireMessage {
+            c_slot: c_slot.unwrap().c_slot,
+            inner: utils::encode(BoxcarMessage::RpcReqRslt(s_slot))?,
+        };
+
+        self.outbox.send((message, None)).await.context("")
+    }
+
     #[instrument]
     pub async fn get_subscribed(&self) -> Vec<u16> {
         let slots = self.slot_map.read().await;
         slots.keys().cloned().collect::<Vec<u16>>()
     }
 
+    /// Subscribe to an s_slot getting all future results from this method.
+    ///
+    /// TODO the requesting c_slot needs to be added to the slot_map, because all incoming updates will be sent with that c_slot
     #[instrument]
     pub async fn subscribe(&self, s_slot: u16) -> anyhow::Result<()> {
         // check if we're already subscribed
@@ -308,17 +329,29 @@ impl Client {
             return Ok(());
         }
 
+        drop(slots);
+
         tracing::trace!(s_slot = s_slot, "subscribing to slot");
 
         // we're not, so tell the server to subscribe us
         let message = BoxcarMessage::Sub(vec![s_slot]);
 
-        if let BoxcarMessage::SubOpFin(change) = self.send_wait(message).await? {
+        if let (BoxcarMessage::SubOpFin(change), c_slot) = self.send_wait(message).await? {
+            tracing::trace!(s_slot = s_slot, "acquiring write handle on slot_map");
+            let mut write_handle = self.slot_map.write().await;
+            tracing::trace!(s_slot = s_slot, "acquired write handle on slot_map");
+
+            write_handle.insert(s_slot, c_slot);
+
+            tracing::trace!(s_slot = s_slot, "dropping write handle on slot_map");
+            drop(write_handle);
+
             tracing::trace!(
                 s_slot = s_slot,
                 change = change,
                 "subscription operation was successful"
             );
+
             Ok(())
         } else {
             bail!("server returned an unexpected response");

@@ -124,7 +124,10 @@ mod tests {
         let subscribed_slots = new_client.get_subscribed().await;
         assert_eq!(subscribed_slots.len(), 1);
 
-        // sleep(Duration::from_secs(5)).await;
-        // println!("{:?}", result.try_recv().await)
+        // now, refresh the slot
+        assert_eq!(new_client.refresh(s_slot).await.is_ok(), true);
+
+        let result = new_client.recv(s_slot).await;
+        println!("{:?}", result);
     }
 }

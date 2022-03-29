@@ -167,7 +167,7 @@ async fn message_handler(
             let sub = req.subscribe;
             let rsp = handle_rpc_req(req, executor).await;
             if sub {
-                if let BoxcarMessage::RpcReqSlot(s_slot) = rsp.clone() {
+                if let BoxcarMessage::RpcReqRslt(s_slot) = rsp.clone() {
                     tracing::trace!("request subscribed, registering subscription");
                     subscribed.write().await.insert(s_slot, message.c_slot);
                 }
@@ -175,6 +175,7 @@ async fn message_handler(
 
             rsp
         }
+        BoxcarMessage::RpcReqRslt(s_slot) => handle_rpc_req_result(s_slot, executor).await,
         BoxcarMessage::RpcRslt(_) => todo!(),
         BoxcarMessage::Sub(slots) => handle_sub(slots, subscribed.clone(), message.c_slot).await,
         BoxcarMessage::UnSub(slots) => handle_unsub(slots, subscribed.clone()).await,
@@ -196,6 +197,18 @@ async fn message_handler(
 }
 
 #[instrument]
+async fn handle_rpc_req_result(s_slot: u16, executor: BoxcarExecutor) -> BoxcarMessage {
+    let handle = executor.tasks.read().await;
+    let task_handle = handle.get(&s_slot);
+    if let Some(task) = task_handle {
+        let inner = task.read().await;
+        BoxcarMessage::RpcRslt((s_slot, inner.result.clone()))
+    } else {
+        BoxcarMessage::ServerError("no such s_slot".to_string())
+    }
+}
+
+#[instrument]
 async fn handle_sub(
     slots: Vec<u16>,
     subscribed: Arc<RwLock<BTreeMap<u16, u16>>>,
@@ -211,7 +224,7 @@ async fn handle_sub(
             tracing::trace!(s_slot = slot, "slot is already mapped for client")
         } else {
             changed = true;
-            handle.insert(slot, c_slot.clone());
+            handle.insert(slot, c_slot);
             tracing::debug!(s_slot = slot, "subscribed client to slot");
         }
     }
@@ -251,7 +264,7 @@ async fn handle_ping(num: u8) -> BoxcarMessage {
 #[instrument]
 async fn handle_rpc_req(req: RpcRequest, mut executor: BoxcarExecutor) -> BoxcarMessage {
     match executor.execute_task(req).await {
-        Ok(s_slot) => BoxcarMessage::RpcReqSlot(s_slot),
+        Ok(s_slot) => BoxcarMessage::RpcReqRslt(s_slot),
         Err(err) => BoxcarMessage::ServerError(format!("unable to schedule request. {:?}", err)),
     }
 }
