@@ -9,6 +9,12 @@
   - time based?
   - # of RPCs executed?
 
+- Global
+  - [ ] Ensure that all Results are used
+  - [ ] Ensure no clippy errors
+  - [ ] Ensure that all read/write locks have explicit acquire and drop trace logs
+  - [ ] Release v0.2.0
+
 - Executor
   - [ ] Rename BoxcarExecutor to just Executor
   - [ ] Clean up logging
