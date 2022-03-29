@@ -1,4 +1,4 @@
-use crate::{utils, BoxcarMessage, RpcRequest, WireMessage};
+use crate::{utils, BoxcarMessage, RpcRequest, RpcResult, WireMessage};
 use anyhow::{bail, Context};
 use deadqueue::unlimited::Queue;
 use futures_util::stream::{SplitSink, SplitStream};
@@ -81,7 +81,7 @@ struct CSlot {
 impl Drop for CSlot {
     #[instrument]
     fn drop(&mut self) {
-        let c_slot = self.c_slot.clone();
+        let c_slot = self.c_slot;
         let map = self.slot_map.clone();
         tokio::task::spawn(async move {
             tracing::trace!(c_slot = c_slot, "CSlot dropped, cleaning up");
@@ -257,6 +257,16 @@ impl Client {
         tracing::trace!(s_slot = s_slot, "dropped read handle on slot_map");
 
         val
+    }
+
+    #[instrument]
+    pub async fn recv_result(&self, s_slot: u16) -> anyhow::Result<RpcResult> {
+        while let Ok(inner) = self.recv(s_slot).await {
+            if let BoxcarMessage::RpcRslt((_, Some(result))) = inner {
+                return Ok(result);
+            }
+        }
+        panic!("at the disco");
     }
 
     #[instrument]

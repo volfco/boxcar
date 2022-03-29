@@ -60,7 +60,7 @@ mod tests {
         let resp = client.recv(result).await;
         if let Ok(inner) = resp {
             if let BoxcarMessage::RpcRslt(inner) = inner {
-                if let RpcResult::Ok(buf) = inner.1 {
+                if let Some(RpcResult::Ok(buf)) = inner.1 {
                     assert_eq!(buf.len(), 0);
                 } else {
                     panic!("rpc result is not Ok")
@@ -127,7 +127,8 @@ mod tests {
         // now, refresh the slot
         assert_eq!(new_client.refresh(s_slot).await.is_ok(), true);
 
-        let result = new_client.recv(s_slot).await;
-        println!("{:?}", result);
+        let result = new_client.recv_result(s_slot).await;
+        assert_eq!(result.is_ok(), true);
+        assert_eq!(result.unwrap(), RpcResult::Ok(vec![]));
     }
 }

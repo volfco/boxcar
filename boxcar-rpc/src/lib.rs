@@ -57,7 +57,7 @@ pub enum BoxcarMessage {
     RpcReqRslt(u16),
 
     /// RPC Status
-    RpcRslt((u16, RpcResult)),
+    RpcRslt((u16, Option<RpcResult>)),
 
     /// Subscribe to the specified s_slot
     Sub(Vec<u16>),
@@ -80,7 +80,7 @@ pub struct RpcRequest {
 }
 
 /// enum to represent the state of an RPC
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone, Eq, PartialEq)]
 pub enum RpcResult {
     None,
     Ok(Vec<u8>),
@@ -91,5 +91,5 @@ pub enum RpcResult {
 #[derive(Clone, Debug)]
 pub struct RPCTask {
     request: RpcRequest,
-    result: RpcResult,
+    result: Option<RpcResult>,
 }

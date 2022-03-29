@@ -10,7 +10,7 @@ use tracing::instrument;
 
 #[derive(Debug)]
 pub struct BusWrapper {
-    bus: broadcast::Sender<(u16, RpcResult)>,
+    bus: broadcast::Sender<(u16, Option<RpcResult>)>,
     s_slot: u16,
 }
 impl BusWrapper {
@@ -18,12 +18,12 @@ impl BusWrapper {
     pub fn send(
         &self,
         message: RpcResult,
-    ) -> Result<usize, broadcast::error::SendError<(u16, RpcResult)>> {
-        self.bus.send((self.s_slot, message))
+    ) -> Result<usize, broadcast::error::SendError<(u16, Option<RpcResult>)>> {
+        self.bus.send((self.s_slot, Some(message)))
     }
 }
 
-type BoxcarBus = (u16, RpcResult);
+type BoxcarBus = (u16, Option<RpcResult>);
 
 #[derive(Clone)]
 pub struct BoxcarExecutor {
@@ -33,7 +33,7 @@ pub struct BoxcarExecutor {
     pub(crate) handlers: Arc<RwLock<Vec<Arc<Handler>>>>,
     pub(crate) tasks: Arc<RwLock<BTreeMap<u16, Arc<RwLock<RPCTask>>>>>,
     /// Task Status Updates
-    pub(crate) bus: broadcast::Sender<(u16, RpcResult)>,
+    pub(crate) bus: broadcast::Sender<BoxcarBus>,
 }
 impl BoxcarExecutor {
     #[instrument]
@@ -117,7 +117,7 @@ impl BoxcarExecutor {
 
     /// Return a listener on the bus
     #[instrument]
-    pub fn get_listener(&self) -> broadcast::Receiver<(u16, RpcResult)> {
+    pub fn get_listener(&self) -> broadcast::Receiver<(u16, Option<RpcResult>)> {
         self.bus.subscribe()
     }
 
@@ -126,7 +126,7 @@ impl BoxcarExecutor {
         let s_slot = self.assign_slot().await;
         let task = RPCTask {
             request,
-            result: RpcResult::None,
+            result: None,
         };
         tracing::debug!(s_slot = s_slot, "executing RPCTask {:?}", &task);
         // let delay = task.request.subscribe;
@@ -182,7 +182,7 @@ impl BoxcarExecutor {
             drop(task);
 
             // take the result of the handler and write it into the RPCTask
-            closure_bus.send((s_slot, result))
+            closure_bus.send((s_slot, Some(result)))
             // TODO Release the s_slot from self.slots
         };
 
