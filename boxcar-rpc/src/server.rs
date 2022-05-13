@@ -1,5 +1,6 @@
 use crate::{utils, BoxcarExecutor, BoxcarMessage, RpcRequest, WireMessage};
 use futures_util::{SinkExt, StreamExt};
+use std::collections::btree_map::Entry;
 use std::collections::BTreeMap;
 use std::fmt::{Debug, Formatter};
 use std::net::SocketAddr;
@@ -7,7 +8,7 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
-use tracing::instrument;
+use tracing::{error, instrument};
 
 pub struct Server {
     listener: TcpListener,
@@ -34,6 +35,8 @@ impl Debug for Server {
     }
 }
 
+type WireMessageChan = (WireMessage, Option<Arc<Notify>>);
+
 ///
 /// c_slot 0 is reserved for unsolicited communication
 #[instrument]
@@ -47,8 +50,8 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
 
     // channel to send outgoing messages to
     let (outbox_tx, mut outbox_rx): (
-        tokio::sync::mpsc::Sender<(WireMessage, Option<Arc<Notify>>)>,
-        tokio::sync::mpsc::Receiver<(WireMessage, Option<Arc<Notify>>)>,
+        mpsc::Sender<WireMessageChan>,
+        mpsc::Receiver<WireMessageChan>,
     ) = mpsc::channel(1);
 
     let mut listener = executor.get_listener();
@@ -61,7 +64,7 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
             if let Some(c_slot) = subscribed_handle.read().await.get(&inner.0) {
                 // tracing::debug!("client is subscribed to slot, relaying message");
                 let inner = BoxcarMessage::RpcRslt(inner);
-                outbox_handle
+                if let Err(e) = outbox_handle
                     .send((
                         WireMessage {
                             c_slot: *c_slot,
@@ -69,7 +72,10 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
                         },
                         None,
                     ))
-                    .await;
+                    .await
+                {
+                    error!("unable to send message. {:?}", e);
+                }
             }
         }
     });
@@ -79,10 +85,7 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
         while let Some((message, notify)) = outbox_rx.recv().await {
             match utils::encode(message) {
                 Ok(raw) => {
-                    match ws_tx
-                        .send(tokio_tungstenite::tungstenite::Message::Binary(raw))
-                        .await
-                    {
+                    match ws_tx.send(Message::Binary(raw)).await {
                         Ok(_) => {
                             tracing::trace!(
                                 client = caddr.as_str(),
@@ -131,7 +134,13 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
                         )
                         .await;
 
-                        outbound_chan.send((result, None)).await;
+                        if let Err(err) = outbound_chan.send((result, None)).await {
+                            tracing::error!(
+                                client = caddr.as_str(),
+                                "unable to flush message. {:?}",
+                                err
+                            )
+                        }
                     } else {
                         tracing::warn!(
                             client = caddr.as_str(),
@@ -159,6 +168,7 @@ async fn message_handler(
 ) -> WireMessage {
     tracing::trace!("handling {:?}", &message);
 
+    // TODO handle this error and not just blindly unwrap()
     let inner: BoxcarMessage = bincode::deserialize(&message.inner[..]).unwrap();
     tracing::trace!("request decoded into {:?}", &inner);
 
@@ -220,12 +230,12 @@ async fn handle_sub(
 
     let mut changed = false;
     for slot in slots {
-        if handle.contains_key(&slot) {
-            tracing::trace!(s_slot = slot, "slot is already mapped for client")
-        } else {
+        if let Entry::Vacant(e) = handle.entry(slot) {
             changed = true;
-            handle.insert(slot, c_slot);
+            e.insert(c_slot);
             tracing::debug!(s_slot = slot, "subscribed client to slot");
+        } else {
+            tracing::trace!(s_slot = slot, "slot is already mapped for client")
         }
     }
 
