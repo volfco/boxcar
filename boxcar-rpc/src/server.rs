@@ -1,3 +1,4 @@
+use crate::rcm::{Claim, ResourceError, ResourceManager};
 use crate::{utils, BoxcarExecutor, BoxcarMessage, RpcRequest, WireMessage};
 use futures_util::{SinkExt, StreamExt};
 use std::collections::btree_map::Entry;
@@ -8,15 +9,28 @@ use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Notify, RwLock};
 use tokio_tungstenite::tungstenite::Message;
-use tracing::{error, instrument};
+use tracing::{error, instrument, trace, warn};
 
 pub struct Server {
     listener: TcpListener,
     executor: BoxcarExecutor,
+    resource_manager: Option<ResourceManager>,
 }
 impl Server {
     pub fn new(listener: TcpListener, executor: BoxcarExecutor) -> Self {
-        Server { listener, executor }
+        Server {
+            listener,
+            executor,
+            resource_manager: None,
+        }
+    }
+    /// Attach a Resource Manager to the server
+    pub fn attach_rcm(self, resource_manager: ResourceManager) -> Self {
+        Server {
+            listener: self.listener,
+            executor: self.executor,
+            resource_manager: Some(resource_manager),
+        }
     }
     #[instrument]
     pub async fn serve(&self) {
@@ -25,7 +39,12 @@ impl Server {
                 address = addr.to_string().as_str(),
                 "accepted connection. spawning connection_handler"
             );
-            tokio::spawn(connection_handler(stream, addr, self.executor.clone()));
+            tokio::spawn(connection_handler(
+                stream,
+                addr,
+                self.executor.clone(),
+                self.resource_manager.clone(),
+            ));
         }
     }
 }
@@ -40,7 +59,12 @@ type WireMessageChan = (WireMessage, Option<Arc<Notify>>);
 ///
 /// c_slot 0 is reserved for unsolicited communication
 #[instrument]
-async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: BoxcarExecutor) {
+async fn connection_handler(
+    stream: TcpStream,
+    addr: SocketAddr,
+    executor: BoxcarExecutor,
+    resource_manager: Option<ResourceManager>,
+) {
     let addr = addr.to_string();
     let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
     let (mut ws_tx, mut ws_rx) = ws.split();
@@ -49,37 +73,57 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
     let subcribed: Arc<RwLock<BTreeMap<u16, u16>>> = Arc::new(RwLock::new(BTreeMap::new()));
 
     // channel to send outgoing messages to
+    // TODO should this be only one? This could gum up everything if the flushing-to-client is
+    //      slower than the rate messages are produced.
     let (outbox_tx, mut outbox_rx): (
         mpsc::Sender<WireMessageChan>,
         mpsc::Receiver<WireMessageChan>,
     ) = mpsc::channel(1);
 
+    // async task to listen to the executor's message bus, and relay messages about tasks this
+    // client has subscribed to.
+    // TODO Don't encode the message per subscription. But do it once and then send it on
     let mut listener = executor.get_listener();
     let subscribed_handle = subcribed.clone();
     let outbox_handle = outbox_tx.clone();
-
-    // TODO Don't encode the message per subscription. But do it once and then send it on
     tokio::spawn(async move {
         while let Ok(inner) = listener.recv().await {
-            if let Some(c_slot) = subscribed_handle.read().await.get(&inner.0) {
+            // check to see if the message's s_slot is something we care about
+            // TODO is there a more efficient way to do this where we don't need to get a read
+            //      handle for each message?
+            let s_slot = inner.0;
+            if let Some(c_slot) = subscribed_handle.read().await.get(&s_slot) {
                 // tracing::debug!("client is subscribed to slot, relaying message");
-                let inner = BoxcarMessage::RpcRslt(inner);
+                // TODO add tracing here?
                 if let Err(e) = outbox_handle
                     .send((
                         WireMessage {
                             c_slot: *c_slot,
-                            inner: utils::encode(inner).unwrap(),
+                            inner: utils::encode(BoxcarMessage::RpcRslt(inner)).unwrap(),
                         },
                         None,
                     ))
                     .await
                 {
-                    error!("unable to send message. {:?}", e);
+                    error!(
+                        s_slot = s_slot,
+                        c_slot = c_slot,
+                        "unable to flush message to outbox. {:?}",
+                        e
+                    );
+                } else {
+                    trace!(
+                        s_slot = s_slot,
+                        c_slot = c_slot,
+                        "flushed message to outbox"
+                    )
                 }
             }
         }
     });
 
+    // Outbox handler. Takes messages from the outbox channel and flushes them to the client via
+    // the websocket... socket
     let caddr = addr.clone();
     tokio::spawn(async move {
         while let Some((message, notify)) = outbox_rx.recv().await {
@@ -87,30 +131,29 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
                 Ok(raw) => {
                     match ws_tx.send(Message::Binary(raw)).await {
                         Ok(_) => {
-                            tracing::trace!(
+                            trace!(
                                 client = caddr.as_str(),
                                 "successfully wrote message to socket"
                             )
                         }
-                        Err(err) => tracing::error!(
+                        Err(err) => error!(
                             client = caddr.as_str(),
-                            "unable to flush message to socket due to error: {:?}",
-                            err
+                            "unable to flush message to socket due to error: {:?}", err
                         ),
                     };
                     if let Some(notif) = notify {
                         notif.notify_one();
                     }
                 }
-                Err(err) => tracing::error!(
+                Err(err) => error!(
                     client = caddr.as_str(),
-                    "unable to encode message. {:?}",
-                    err
+                    "unable to encode message. {:?}", err
                 ),
             }
         }
     });
 
+    // handle inbound messages
     while let Some(message) = ws_rx.next().await {
         match message {
             Ok(inner) => {
@@ -119,8 +162,9 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
                 let task_exec = executor.clone();
                 let task_subcribed = subcribed.clone();
                 let caddr = addr.clone();
+                let rcm = resource_manager.clone();
                 tokio::spawn(async move {
-                    tracing::trace!(
+                    trace!(
                         client = caddr.as_str(),
                         "received message from client. {:?}",
                         &inner
@@ -131,18 +175,18 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
                             utils::decode(&raw[..]).unwrap(),
                             task_exec,
                             task_subcribed,
+                            rcm,
                         )
                         .await;
 
                         if let Err(err) = outbound_chan.send((result, None)).await {
-                            tracing::error!(
+                            error!(
                                 client = caddr.as_str(),
-                                "unable to flush message. {:?}",
-                                err
+                                "unable to flush message. {:?}", err
                             )
                         }
                     } else {
-                        tracing::warn!(
+                        warn!(
                             client = caddr.as_str(),
                             "got message with non-binary data. ignoring"
                         );
@@ -150,10 +194,9 @@ async fn connection_handler(stream: TcpStream, addr: SocketAddr, executor: Boxca
                 });
             }
             Err(error) => {
-                tracing::error!(
+                error!(
                     client = addr.as_str(),
-                    "unable to read message. {:?}",
-                    error
+                    "unable to read message. {:?}", error
                 );
             }
         };
@@ -165,25 +208,57 @@ async fn message_handler(
     message: WireMessage,
     executor: BoxcarExecutor,
     subscribed: Arc<RwLock<BTreeMap<u16, u16>>>,
+    resource_manager: Option<ResourceManager>,
 ) -> WireMessage {
-    tracing::trace!("handling {:?}", &message);
+    trace!("handling {:?}", &message);
 
     // TODO handle this error and not just blindly unwrap()
     let inner: BoxcarMessage = bincode::deserialize(&message.inner[..]).unwrap();
-    tracing::trace!("request decoded into {:?}", &inner);
+    trace!("request decoded into {:?}", &inner);
 
     let response = match inner {
         BoxcarMessage::RpcReq(req) => {
             let sub = req.subscribe;
-            let rsp = handle_rpc_req(req, executor).await;
-            if sub {
-                if let BoxcarMessage::RpcReqRslt(s_slot) = rsp.clone() {
-                    tracing::trace!("request subscribed, registering subscription");
-                    subscribed.write().await.insert(s_slot, message.c_slot);
+
+            // TODO This code sucks. Make it better
+            let mut claims: Result<Vec<Claim>, BoxcarMessage> = Ok(vec![]);
+            if let Some(resource_req) = &req.resources {
+                trace!(
+                    "request has is requesting resource allocations. {:?}",
+                    &resource_req
+                );
+                if let Some(rcm) = resource_manager {
+                    let mut l_claims = vec![];
+                    for row in resource_req {
+                        match rcm.consume(row.0, *row.1) {
+                            Ok(claim) => l_claims.push(claim),
+                            Err(err) => {
+                                claims = Err(BoxcarMessage::ResourceError(err));
+                                break;
+                            }
+                        }
+                    }
+                    claims = Ok(l_claims);
+                } else {
+                    warn!("request contained resource requests, but no resource manager defined");
+                    claims = Err(BoxcarMessage::ResourceError(ResourceError::NotRegistered));
                 }
             }
 
-            rsp
+            // if there is an error securing the claim, return it
+            if claims.is_err() {
+                claims.err().unwrap()
+            } else {
+                let rsp = handle_rpc_req(req, executor, claims.unwrap()).await;
+                if sub {
+                    if let BoxcarMessage::RpcReqRslt(s_slot) = rsp.clone() {
+                        trace!("request subscribed, registering subscription");
+                        subscribed.write().await.insert(s_slot, message.c_slot);
+                    }
+                }
+
+                rsp
+            }
         }
         BoxcarMessage::RpcReqRslt(s_slot) => handle_rpc_req_result(s_slot, executor).await,
         BoxcarMessage::RpcRslt(_) => todo!(),
@@ -192,13 +267,13 @@ async fn message_handler(
         BoxcarMessage::Hangup => todo!(),
         BoxcarMessage::Ping(num) => handle_ping(num).await,
         BoxcarMessage::Pong(_) => {
-            tracing::warn!("BoxcarMessage::Pong is unexpected. ignoring");
+            warn!("BoxcarMessage::Pong is unexpected. ignoring");
             BoxcarMessage::ServerError("unsupported message".to_string())
         }
         _ => todo!(),
     };
 
-    tracing::trace!("responding {:?}", &response);
+    trace!("responding {:?}", &response);
 
     WireMessage {
         c_slot: message.c_slot,
@@ -272,8 +347,12 @@ async fn handle_ping(num: u8) -> BoxcarMessage {
 }
 
 #[instrument]
-async fn handle_rpc_req(req: RpcRequest, mut executor: BoxcarExecutor) -> BoxcarMessage {
-    match executor.execute_task(req).await {
+async fn handle_rpc_req(
+    req: RpcRequest,
+    mut executor: BoxcarExecutor,
+    claims: Vec<Claim>,
+) -> BoxcarMessage {
+    match executor.execute_task(req, claims).await {
         Ok(s_slot) => BoxcarMessage::RpcReqRslt(s_slot),
         Err(err) => BoxcarMessage::ServerError(format!("unable to schedule request. {:?}", err)),
     }
@@ -319,6 +398,7 @@ mod tests {
         let server = Server {
             listener: TcpListener::bind("127.0.0.1:9932").await.unwrap(),
             executor,
+            resource_manager: None,
         };
 
         tokio::task::spawn(async move { server.serve().await });

@@ -9,15 +9,18 @@ pub mod client;
 /// `c_slot` Client Communication Slot.
 /// `s_slot` Server Slot
 pub mod executor;
+pub mod rcm;
 pub mod server;
 pub mod utils;
 
 pub use crate::client::Client;
 pub use crate::executor::{BoxcarExecutor, BusWrapper};
 pub use crate::server::Server;
+use std::collections::HashMap;
 
 // TODO Implement RPC Result expiration on number of rpcs completed. By default purge after (2*max concurrent tasks) stored RPCResults
 
+use crate::rcm::ResourceError;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
@@ -66,6 +69,8 @@ pub enum BoxcarMessage {
     /// (un)subscribe operation success. bool indicates if the operation resulted in any changes
     SubOpFin(bool),
 
+    ResourceError(ResourceError),
+
     ServerError(String),
     Hangup,
     Ping(u8),
@@ -74,9 +79,16 @@ pub enum BoxcarMessage {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RpcRequest {
+    /// Remote method to invoke
     pub method: String,
+    /// Raw body that is passed to the method handler. This can be any arbitrary data that would be
+    /// decoded on the server's side
     pub body: Vec<u8>,
+    /// Ask the server to automatically send a response to the client when it happens. Reduces
+    /// latency and overhead.
     pub subscribe: bool,
+    /// An optional map of resources that are required to execute this RPC call.
+    pub resources: Option<HashMap<String, usize>>,
 }
 
 /// enum to represent the state of an RPC

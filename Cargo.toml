@@ -1,5 +1,6 @@
 [workspace]
 members = [
     "boxcar-rpc",
-    "boxcar-service"
+    "boxcar-cluster",
+    "etcdsvc.rs"
 ]

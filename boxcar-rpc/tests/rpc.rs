@@ -49,6 +49,7 @@ mod tests {
             method: "foo".to_string(),
             body: vec![],
             subscribe: true,
+            resources: None,
         };
         let r = client.call(command).await;
         assert_eq!(r.is_ok(), true);
@@ -95,6 +96,7 @@ mod tests {
             method: "foo".to_string(),
             body: vec![],
             subscribe: true,
+            resources: None,
         };
 
         print!("executing {:?}", &command);

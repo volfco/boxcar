@@ -11,6 +11,7 @@ async fn main() {
         method: "sleep".to_string(),
         body,
         subscribe: true,
+        resources: None,
     };
 
     // send the RpcRequest message to the server
