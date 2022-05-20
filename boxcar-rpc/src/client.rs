@@ -212,6 +212,8 @@ impl Client {
         Ok((queue.pop().await, c_slot))
     }
 
+    ///
+    /// TODO Get rid of anyhow
     #[instrument]
     pub async fn call(&self, inner: RpcRequest) -> anyhow::Result<u16> {
         tracing::debug!("sending {:?} for execution", &inner);
@@ -241,6 +243,10 @@ impl Client {
                 Ok(s_slot)
             }
             BoxcarMessage::ServerError(err) => bail!("server returned error. {}", err),
+            BoxcarMessage::ResourceError(err) => bail!(
+                "server failed to allocate the requested resources. {:?}",
+                err
+            ),
             _ => bail!("unexpected server response"),
         }
     }

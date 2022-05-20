@@ -176,43 +176,43 @@ impl ServiceManager {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::{InstanceRegistration, RegistrationHandle, ServiceManager, ServiceManagerConfig};
-    use std::time::Duration;
-    use tokio::time::sleep;
-    use tracing::info;
-
-    #[tokio::test]
-    async fn test_reg() {
-        tracing_subscriber::fmt::init();
-
-        let mut client = etcd_client::Client::connect(["localhost:2379"], None)
-            .await
-            .unwrap();
-
-        let mut svc = ServiceManager::new(
-            client,
-            ServiceManagerConfig {
-                keyspace: "test".to_string(),
-            },
-        )
-        .await
-        .unwrap();
-
-        svc.register(
-            "hello_world",
-            InstanceRegistration {
-                id: "id".to_string(),
-                addr: "".to_string(),
-                port: 0,
-                meta: Default::default(),
-            },
-        )
-        .await;
-
-        sleep(Duration::from_secs(10)).await;
-        info!("{:?}", svc.lookup("hello_world").await);
-        sleep(Duration::from_secs(10)).await;
-    }
-}
+// #[cfg(test)]
+// mod tests {
+//     use crate::{InstanceRegistration, RegistrationHandle, ServiceManager, ServiceManagerConfig};
+//     use std::time::Duration;
+//     use tokio::time::sleep;
+//     use tracing::info;
+//
+//     #[tokio::test]
+//     async fn test_reg() {
+//         tracing_subscriber::fmt::init();
+//
+//         let mut client = etcd_client::Client::connect(["localhost:2379"], None)
+//             .await
+//             .unwrap();
+//
+//         let mut svc = ServiceManager::new(
+//             client,
+//             ServiceManagerConfig {
+//                 keyspace: "test".to_string(),
+//             },
+//         )
+//         .await
+//         .unwrap();
+//
+//         svc.register(
+//             "hello_world",
+//             InstanceRegistration {
+//                 id: "id".to_string(),
+//                 addr: "".to_string(),
+//                 port: 0,
+//                 meta: Default::default(),
+//             },
+//         )
+//         .await;
+//
+//         sleep(Duration::from_secs(10)).await;
+//         info!("{:?}", svc.lookup("hello_world").await);
+//         sleep(Duration::from_secs(10)).await;
+//     }
+// }

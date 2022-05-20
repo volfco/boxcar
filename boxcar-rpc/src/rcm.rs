@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::runtime::{Handle, Runtime};
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Resource Manager
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -17,7 +17,6 @@ pub enum ResourceError {
 
 #[derive(Debug, Clone)]
 pub struct Resource {
-    #[warn(dead_code)]
     resource: String,
     lake: Arc<Mutex<usize>>,
 }
@@ -25,6 +24,10 @@ impl Resource {
     pub fn consume(&self, amount: usize) -> Result<Claim, ResourceError> {
         let mut handle = self.lake.lock().unwrap();
         if amount > *handle {
+            warn!(
+                "attempted to consume {} units of {}, but only {} units exist",
+                &amount, &self.resource, &*handle
+            );
             return Err(NotEnough(amount, *handle));
         }
 
@@ -63,17 +66,6 @@ impl Claim {
 impl Drop for Claim {
     fn drop(&mut self) {
         self.int_release()
-    }
-}
-
-// taken from https://stackoverflow.com/a/68833681
-fn get_runtime_handle() -> (Handle, Option<Runtime>) {
-    match Handle::try_current() {
-        Ok(h) => (h, None),
-        Err(_) => {
-            let rt = Runtime::new().unwrap();
-            (rt.handle().clone(), Some(rt))
-        }
     }
 }
 

@@ -13,6 +13,7 @@
   - [ ] Ensure that all Results are used
   - [ ] Ensure no clippy errors
   - [ ] Ensure that all read/write locks have explicit acquire and drop trace logs
+  - [ ] Remove `anyhow` and switch to proper error Enum
   - [ ] Release v0.2.0
 
 - Executor

@@ -4,14 +4,13 @@ extern crate core;
 mod tests {
     use async_trait::async_trait;
     use boxcar_rpc::rcm::ResourceManager;
-    use boxcar_rpc::{
-        BoxcarExecutor, BoxcarMessage, BusWrapper, HandlerTrait, RpcRequest, RpcResult,
-    };
+    use boxcar_rpc::{BoxcarExecutor, BusWrapper, HandlerTrait, RpcRequest, RpcResult};
     use boxcar_rpc::{Client, Server};
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
+    use tracing::error;
 
     struct TestHandler {}
     #[async_trait]
@@ -34,8 +33,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_rcm_valid_allocation() {
-        tracing_subscriber::fmt::init();
-
         let test_handler = TestHandler {};
 
         let mut executor = BoxcarExecutor::new();
@@ -45,7 +42,7 @@ mod tests {
         rcm.add("test1", 1024);
         rcm.add("test2", 512);
 
-        let server = Server::new(TcpListener::bind("127.0.0.1:9933").await.unwrap(), executor)
+        let server = Server::new(TcpListener::bind("127.0.0.1:9939").await.unwrap(), executor)
             .attach_rcm(rcm.clone());
 
         tokio::task::spawn(async move { server.serve().await });
@@ -53,7 +50,7 @@ mod tests {
         // give the server a minute to start up
         sleep(Duration::from_secs(1)).await;
 
-        let client = Client::new("ws://127.0.0.1:9933").await.unwrap();
+        let client = Client::new("ws://127.0.0.1:9939").await.unwrap();
 
         let command = RpcRequest {
             method: "foo".to_string(),
@@ -92,5 +89,43 @@ mod tests {
         } else {
             panic!("unexpected message response")
         }
+    }
+
+    #[tokio::test]
+    async fn test_rcm_invalid_allocation() {
+        tracing_subscriber::fmt::init();
+
+        let test_handler = TestHandler {};
+
+        let mut executor = BoxcarExecutor::new();
+        executor.add_handler(Box::new(test_handler)).await;
+
+        let rcm = ResourceManager::new();
+        rcm.add("test1", 1024);
+        rcm.add("test2", 512);
+
+        let server = Server::new(TcpListener::bind("127.0.0.1:9933").await.unwrap(), executor)
+            .attach_rcm(rcm.clone());
+
+        tokio::task::spawn(async move { server.serve().await });
+
+        // give the server a minute to start up
+        sleep(Duration::from_secs(1)).await;
+
+        let client = Client::new("ws://127.0.0.1:9933").await.unwrap();
+
+        let command = RpcRequest {
+            method: "foo".to_string(),
+            body: vec![],
+            subscribe: true,
+            resources: {
+                let mut resource_map = HashMap::new();
+                resource_map.insert("test1".to_string(), 2048);
+
+                Some(resource_map)
+            },
+        };
+        let r = client.call(command).await;
+        assert_eq!(r.is_err(), true);
     }
 }

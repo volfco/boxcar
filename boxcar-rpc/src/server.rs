@@ -238,7 +238,9 @@ async fn message_handler(
                             }
                         }
                     }
-                    claims = Ok(l_claims);
+                    if !l_claims.is_empty() {
+                        claims = Ok(l_claims);
+                    }
                 } else {
                     warn!("request contained resource requests, but no resource manager defined");
                     claims = Err(BoxcarMessage::ResourceError(ResourceError::NotRegistered));
