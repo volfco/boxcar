@@ -30,11 +30,11 @@ async fn main() {
 
     // subscribe to the slot. this tells the client to allocate a client side slot, and inform the
     // server that this client wants to get updates for this slot
-    client2.subscribe(slot).await;
+    let _ = client2.subscribe(slot).await;
 
     // optional- refresh the slot. this asks the server to send the last recorded result for the
     // task. The task could be done at this point, or not.
-    client2.refresh(slot).await;
+    let _ = client2.refresh(slot).await;
 
     // now we can wait for the result
     let response = client2.recv_result(slot).await.unwrap();
