@@ -3,8 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tokio::runtime::{Handle, Runtime};
-use tracing::{error, warn};
+use tracing::warn;
 
 /// Resource Manager
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

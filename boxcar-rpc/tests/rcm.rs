@@ -4,19 +4,19 @@ extern crate core;
 mod tests {
     use async_trait::async_trait;
     use boxcar_rpc::rcm::ResourceManager;
-    use boxcar_rpc::{BoxcarExecutor, BusWrapper, HandlerTrait, RpcRequest, RpcResult};
+    use boxcar_rpc::{
+        BoxcarExecutor, BoxcarMessage, BusWrapper, HandlerTrait, RpcRequest, RpcResult,
+    };
     use boxcar_rpc::{Client, Server};
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::net::TcpListener;
     use tokio::time::sleep;
-    use tracing::error;
 
     struct TestHandler {}
     #[async_trait]
     impl HandlerTrait for TestHandler {
-        async fn call(&self, _method: &str, _arguments: Vec<u8>, bus: BusWrapper) -> RpcResult {
-            println!("{:?}", bus);
+        async fn call(&self, _method: &str, _arguments: Vec<u8>, _bus: BusWrapper) -> RpcResult {
             tracing::info!("handler has started");
             sleep(Duration::from_secs(3)).await;
             RpcResult::Ok(vec![])
@@ -93,8 +93,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_rcm_invalid_allocation() {
-        tracing_subscriber::fmt::init();
-
         let test_handler = TestHandler {};
 
         let mut executor = BoxcarExecutor::new();
