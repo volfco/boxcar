@@ -5,11 +5,11 @@ use std::time::Duration;
 use tracing::{debug, info, trace, warn, Instrument};
 
 use serde::{Deserialize, Serialize};
-use tokio::sync::RwLock;
+use std::sync::RwLock;
 use tokio::time::sleep;
 
 // TODO make this configurable when a service is registered
-const ETCD_LEASE_TTL_SEC: u64 = 30;
+const ETCD_LEASE_TTL_SEC: u64 = 10;
 
 pub struct ServiceManagerConfig {
     /// Keyspace Base Path
@@ -47,7 +47,7 @@ impl RegistrationHandle {
             let keepalive_time = ETCD_LEASE_TTL_SEC / 2;
 
             loop {
-                if !*lease_control.read().await {
+                if !*lease_control.read().unwrap() {
                     info!("lease_control set to false, exiting keep alive loop");
                     break;
                 }
@@ -78,7 +78,7 @@ impl RegistrationHandle {
 impl Drop for RegistrationHandle {
     fn drop(&mut self) {
         debug!("RegistrationHandle dropped, signaling for the lease task to stop");
-        *self.lease_enabled.blocking_write() = false;
+        *self.lease_enabled.write().unwrap() = false;
     }
 }
 
@@ -176,43 +176,61 @@ impl ServiceManager {
     }
 }
 
-// #[cfg(test)]
-// mod tests {
-//     use crate::{InstanceRegistration, RegistrationHandle, ServiceManager, ServiceManagerConfig};
-//     use std::time::Duration;
-//     use tokio::time::sleep;
-//     use tracing::info;
-//
-//     #[tokio::test]
-//     async fn test_reg() {
-//         tracing_subscriber::fmt::init();
-//
-//         let mut client = etcd_client::Client::connect(["localhost:2379"], None)
-//             .await
-//             .unwrap();
-//
-//         let mut svc = ServiceManager::new(
-//             client,
-//             ServiceManagerConfig {
-//                 keyspace: "test".to_string(),
-//             },
-//         )
-//         .await
-//         .unwrap();
-//
-//         svc.register(
-//             "hello_world",
-//             InstanceRegistration {
-//                 id: "id".to_string(),
-//                 addr: "".to_string(),
-//                 port: 0,
-//                 meta: Default::default(),
-//             },
-//         )
-//         .await;
-//
-//         sleep(Duration::from_secs(10)).await;
-//         info!("{:?}", svc.lookup("hello_world").await);
-//         sleep(Duration::from_secs(10)).await;
-//     }
-// }
+#[cfg(test)]
+mod tests {
+    use crate::{InstanceRegistration, ServiceManager, ServiceManagerConfig, ETCD_LEASE_TTL_SEC};
+    use std::time::Duration;
+    use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn test_reg() {
+        let client = etcd_client::Client::connect(["localhost:2379"], None)
+            .await
+            .unwrap();
+
+        #[warn(unused_mut)]
+        let mut svc = ServiceManager::new(
+            client,
+            ServiceManagerConfig {
+                keyspace: "test".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let hsvc = svc
+            .register(
+                "hello_world",
+                InstanceRegistration {
+                    id: "id".to_string(),
+                    addr: "".to_string(),
+                    port: 0,
+                    meta: Default::default(),
+                },
+            )
+            .await;
+
+        assert_eq!(hsvc.is_ok(), true);
+
+        let handle = hsvc.unwrap();
+
+        sleep(Duration::from_secs(2)).await;
+
+        let lookup = svc.lookup("hello_world").await;
+        assert_eq!(lookup.is_ok(), true);
+        let services = lookup.unwrap();
+        assert_eq!(services.len(), 1);
+
+        // drop the handle, releasing it
+        drop(handle);
+
+        // let the lease expire
+        sleep(Duration::from_secs(ETCD_LEASE_TTL_SEC + 1)).await;
+
+        // now, re-check to see if it's gone
+        let lookup = svc.lookup("hello_world").await;
+        assert_eq!(lookup.is_ok(), true);
+        let services = lookup.unwrap();
+        assert_eq!(services.len(), 0);
+    }
+}
