@@ -16,17 +16,27 @@ pub struct ServiceManagerConfig {
     keyspace: String,
 }
 
+impl ServiceManagerConfig {
+    pub fn new(keyspace: impl Into<String>) -> Self {
+        ServiceManagerConfig {
+            keyspace: keyspace.into(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InstanceRegistration {
     /// Service ID
     /// TODO Make this generated
-    id: String,
+    pub id: String,
     /// Service Address. Can be a IP address or Hostname
-    addr: String,
+    pub addr: String,
     /// Service Port
-    port: u16,
+    pub port: u16,
+    /// Protocol
+    pub proto: String,
     /// Meta fields
-    meta: HashMap<String, String>,
+    pub meta: HashMap<String, String>,
 }
 
 /// Represents a registered instance.
@@ -205,6 +215,7 @@ mod tests {
                     id: "id".to_string(),
                     addr: "".to_string(),
                     port: 0,
+                    proto: "tcp".to_string(),
                     meta: Default::default(),
                 },
             )
