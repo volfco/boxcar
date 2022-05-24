@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use boxcar_rpc;
 use boxcar_rpc::{BoxcarExecutor, BusWrapper, HandlerTrait, RpcResult, Server};
 use std::time::Duration;
-use tokio::net::TcpListener;
 use tokio::time::sleep;
 
 struct Example {}
@@ -35,8 +34,9 @@ async fn main() {
     let mut executor = BoxcarExecutor::new();
     executor.add_handler(Box::new(test_handler)).await;
 
-    let server = Server::new(TcpListener::bind("127.0.0.1:9930").await.unwrap(), executor);
-
+    let server = Server::new()
+        .bind("127.0.0.1:9930".parse().unwrap())
+        .executor(executor);
     // start the server
-    server.serve().await
+    server.serve().await.unwrap()
 }

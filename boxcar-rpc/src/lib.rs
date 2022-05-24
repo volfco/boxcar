@@ -88,7 +88,7 @@ pub struct RpcRequest {
     /// latency and overhead.
     pub subscribe: bool,
     /// An optional map of resources that are required to execute this RPC call.
-    pub resources: Option<HashMap<String, usize>>,
+    pub resources: HashMap<String, usize>,
 }
 
 /// enum to represent the state of an RPC

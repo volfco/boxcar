@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Resource Manager
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -70,13 +70,24 @@ impl Drop for Claim {
 
 #[derive(Debug, Clone)]
 pub struct ResourceManager {
+    /// If permissive is true, empty claims will be returned for non-existent resources.
+    permissive: bool,
     /// Map of Resources
     resource_lake: Arc<Mutex<HashMap<String, Resource>>>,
 }
 impl ResourceManager {
     pub fn new() -> Self {
         ResourceManager {
+            permissive: false,
             resource_lake: Arc::new(Default::default()),
+        }
+    }
+
+    /// Modify the permissive setting of the resource manager
+    pub fn permissive(self, mode: bool) -> Self {
+        ResourceManager {
+            permissive: mode,
+            resource_lake: self.resource_lake,
         }
     }
 
@@ -123,6 +134,16 @@ impl ResourceManager {
         let h = self.resource_lake.lock().unwrap();
         if let Some(r) = h.get(resource.as_str()) {
             r.consume(amount)
+        } else if self.permissive {
+            debug!(
+                resource = resource.as_str(),
+                "resource does not exist, but permissive mode is set"
+            );
+            // generate and return a claim that doesn't point to anything
+            Ok(Claim {
+                amount,
+                lake: Arc::new(Mutex::new(0)),
+            })
         } else {
             warn!(resource = resource.as_str(), "resource does not exist");
             Err(ResourceError::Unknown)

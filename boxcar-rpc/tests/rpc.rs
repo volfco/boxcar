@@ -7,8 +7,8 @@ mod tests {
         BoxcarExecutor, BoxcarMessage, BusWrapper, HandlerTrait, RpcRequest, RpcResult,
     };
     use boxcar_rpc::{Client, Server};
+    use std::collections::HashMap;
     use std::time::Duration;
-    use tokio::net::TcpListener;
     use tokio::time::sleep;
 
     struct TestHandler {}
@@ -36,7 +36,9 @@ mod tests {
         let mut executor = BoxcarExecutor::new();
         executor.add_handler(Box::new(test_handler)).await;
 
-        let server = Server::new(TcpListener::bind("127.0.0.1:9933").await.unwrap(), executor);
+        let server = Server::new()
+            .bind("127.0.0.1:9933".parse().unwrap())
+            .executor(executor);
 
         tokio::task::spawn(async move { server.serve().await });
 
@@ -49,7 +51,7 @@ mod tests {
             method: "foo".to_string(),
             body: vec![],
             subscribe: true,
-            resources: None,
+            resources: HashMap::new(),
         };
         let r = client.call(command).await;
         assert_eq!(r.is_ok(), true);
@@ -81,7 +83,9 @@ mod tests {
         let mut executor = BoxcarExecutor::new();
         executor.add_handler(Box::new(test_handler)).await;
 
-        let server = Server::new(TcpListener::bind("127.0.0.1:9934").await.unwrap(), executor);
+        let server = Server::new()
+            .bind("127.0.0.1:9934".parse().unwrap())
+            .executor(executor);
 
         tokio::task::spawn(async move { server.serve().await });
 
@@ -94,7 +98,7 @@ mod tests {
             method: "foo".to_string(),
             body: vec![],
             subscribe: true,
-            resources: None,
+            resources: HashMap::new(),
         };
 
         let r = client.call(command).await;

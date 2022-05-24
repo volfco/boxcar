@@ -10,7 +10,6 @@ mod tests {
     use boxcar_rpc::{Client, Server};
     use std::collections::HashMap;
     use std::time::Duration;
-    use tokio::net::TcpListener;
     use tokio::time::sleep;
 
     struct TestHandler {}
@@ -42,8 +41,10 @@ mod tests {
         rcm.add("test1", 1024);
         rcm.add("test2", 512);
 
-        let server = Server::new(TcpListener::bind("127.0.0.1:9939").await.unwrap(), executor)
-            .attach_rcm(rcm.clone());
+        let server = Server::new()
+            .bind("127.0.0.1:9939".parse().unwrap())
+            .executor(executor)
+            .resource_manager(rcm.clone());
 
         tokio::task::spawn(async move { server.serve().await });
 
@@ -60,7 +61,7 @@ mod tests {
                 let mut resource_map = HashMap::new();
                 resource_map.insert("test1".to_string(), 512);
 
-                Some(resource_map)
+                resource_map
             },
         };
         let r = client.call(command).await;
@@ -102,8 +103,10 @@ mod tests {
         rcm.add("test1", 1024);
         rcm.add("test2", 512);
 
-        let server = Server::new(TcpListener::bind("127.0.0.1:9933").await.unwrap(), executor)
-            .attach_rcm(rcm.clone());
+        let server = Server::new()
+            .bind("127.0.0.1:9933".parse().unwrap())
+            .executor(executor)
+            .resource_manager(rcm);
 
         tokio::task::spawn(async move { server.serve().await });
 
@@ -120,7 +123,7 @@ mod tests {
                 let mut resource_map = HashMap::new();
                 resource_map.insert("test1".to_string(), 2048);
 
-                Some(resource_map)
+                resource_map
             },
         };
         let r = client.call(command).await;

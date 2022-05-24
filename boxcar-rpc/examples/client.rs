@@ -1,4 +1,5 @@
 use boxcar_rpc::{Client, RpcRequest};
+use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() {
@@ -10,7 +11,7 @@ async fn main() {
         method: "no_sleep".to_string(),
         body,
         subscribe: true,
-        resources: None,
+        resources: HashMap::new(),
     };
 
     // send the RpcRequest message to the server

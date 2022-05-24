@@ -12,30 +12,45 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, instrument, trace, warn};
 
 pub struct Server {
-    listener: TcpListener,
+    bind: SocketAddr,
     executor: BoxcarExecutor,
-    resource_manager: Option<ResourceManager>,
+    resource_manager: ResourceManager,
 }
 impl Server {
-    pub fn new(listener: TcpListener, executor: BoxcarExecutor) -> Self {
+    pub fn new() -> Self {
         Server {
-            listener,
-            executor,
-            resource_manager: None,
+            bind: "127.0.0.1:9930".parse().unwrap(),
+            executor: BoxcarExecutor::new(),
+            resource_manager: ResourceManager::new().permissive(true),
         }
     }
-    /// Attach a Resource Manager to the server
-    pub fn attach_rcm(self, resource_manager: ResourceManager) -> Self {
+    pub fn bind(self, bind: SocketAddr) -> Self {
         Server {
-            listener: self.listener,
+            bind,
             executor: self.executor,
-            resource_manager: Some(resource_manager),
+            resource_manager: self.resource_manager,
         }
     }
+    pub fn executor(self, executor: BoxcarExecutor) -> Self {
+        Server {
+            bind: self.bind,
+            executor,
+            resource_manager: self.resource_manager,
+        }
+    }
+    pub fn resource_manager(self, resource_manager: ResourceManager) -> Self {
+        Server {
+            bind: self.bind,
+            executor: self.executor,
+            resource_manager,
+        }
+    }
+
     #[instrument]
-    pub async fn serve(&self) {
-        while let Ok((stream, addr)) = self.listener.accept().await {
-            tracing::trace!(
+    pub async fn serve(&self) -> anyhow::Result<()> {
+        // TODO Implement a finite slot limit for connections, so a connection will occupy a specific slot
+        while let Ok((stream, addr)) = TcpListener::bind(self.bind).await?.accept().await {
+            trace!(
                 address = addr.to_string().as_str(),
                 "accepted connection. spawning connection_handler"
             );
@@ -46,11 +61,18 @@ impl Server {
                 self.resource_manager.clone(),
             ));
         }
+
+        Ok(())
+    }
+}
+impl Default for Server {
+    fn default() -> Self {
+        Self::new()
     }
 }
 impl Debug for Server {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{:?}", self.listener)
+        write!(f, "{:?}", self.bind)
     }
 }
 
@@ -63,7 +85,7 @@ async fn connection_handler(
     stream: TcpStream,
     addr: SocketAddr,
     executor: BoxcarExecutor,
-    resource_manager: Option<ResourceManager>,
+    resource_manager: ResourceManager,
 ) {
     let addr = addr.to_string();
     let ws = tokio_tungstenite::accept_async(stream).await.unwrap();
@@ -208,7 +230,7 @@ async fn message_handler(
     message: WireMessage,
     executor: BoxcarExecutor,
     subscribed: Arc<RwLock<BTreeMap<u16, u16>>>,
-    resource_manager: Option<ResourceManager>,
+    resource_manager: ResourceManager,
 ) -> WireMessage {
     trace!("handling {:?}", &message);
 
@@ -220,38 +242,31 @@ async fn message_handler(
         BoxcarMessage::RpcReq(req) => {
             let sub = req.subscribe;
 
-            // TODO This code sucks. Make it better
-            let mut claims: Result<Vec<Claim>, BoxcarMessage> = Ok(vec![]);
-            if let Some(resource_req) = &req.resources {
+            let mut claims = vec![];
+            let mut error = None;
+            for resource in req.resources.iter() {
                 trace!(
                     "request has is requesting resource allocations. {:?}",
-                    &resource_req
+                    &resource
                 );
-                if let Some(rcm) = resource_manager {
-                    let mut l_claims = vec![];
-                    for row in resource_req {
-                        match rcm.consume(row.0, *row.1) {
-                            Ok(claim) => l_claims.push(claim),
-                            Err(err) => {
-                                claims = Err(BoxcarMessage::ResourceError(err));
-                                break;
-                            }
-                        }
+                match resource_manager.consume(resource.0, *resource.1) {
+                    Ok(claim) => claims.push(claim),
+                    Err(err) => {
+                        error = Some(err);
+                        break;
                     }
-                    if !l_claims.is_empty() {
-                        claims = Ok(l_claims);
-                    }
-                } else {
-                    warn!("request contained resource requests, but no resource manager defined");
-                    claims = Err(BoxcarMessage::ResourceError(ResourceError::NotRegistered));
                 }
             }
 
-            // if there is an error securing the claim, return it
-            if claims.is_err() {
-                claims.err().unwrap()
+            if claims.len() != req.resources.len() {
+                warn!("unable to satisfy all resource requests");
+                if let Some(error) = error {
+                    BoxcarMessage::ResourceError(error)
+                } else {
+                    BoxcarMessage::ResourceError(ResourceError::Unknown)
+                }
             } else {
-                let rsp = handle_rpc_req(req, executor, claims.unwrap()).await;
+                let rsp = handle_rpc_req(req, executor, claims).await;
                 if sub {
                     if let BoxcarMessage::RpcReqRslt(s_slot) = rsp.clone() {
                         trace!("request subscribed, registering subscription");
@@ -369,7 +384,6 @@ mod tests {
     use async_trait::async_trait;
     use futures_util::{SinkExt, StreamExt};
     use std::time::Duration;
-    use tokio::net::TcpListener;
     use tokio::time::sleep;
     use tokio_tungstenite::tungstenite::Message;
 
@@ -397,11 +411,9 @@ mod tests {
         let mut executor = BoxcarExecutor::new();
         executor.add_handler(Box::new(test_handler)).await;
 
-        let server = Server {
-            listener: TcpListener::bind("127.0.0.1:9932").await.unwrap(),
-            executor,
-            resource_manager: None,
-        };
+        let server = Server::new()
+            .bind("127.0.0.1:9932".parse().unwrap())
+            .executor(executor);
 
         tokio::task::spawn(async move { server.serve().await });
 

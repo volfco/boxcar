@@ -413,7 +413,6 @@ mod tests {
     use crate::{BoxcarExecutor, BoxcarMessage, BusWrapper, HandlerTrait, RpcResult};
     use async_trait::async_trait;
     use std::time::Duration;
-    use tokio::net::TcpListener;
     use tokio::time::sleep;
 
     struct TestHandler {}
@@ -440,7 +439,9 @@ mod tests {
         let mut executor = BoxcarExecutor::new();
         executor.add_handler(Box::new(test_handler)).await;
 
-        let server = Server::new(TcpListener::bind("127.0.0.1:9931").await.unwrap(), executor);
+        let server = Server::new()
+            .bind("127.0.0.1:9931".parse().unwrap())
+            .executor(executor);
 
         tokio::task::spawn(async move { server.serve().await });
 
