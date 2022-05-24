@@ -12,9 +12,9 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{error, instrument, trace, warn};
 
 pub struct Server {
-    bind: SocketAddr,
-    executor: BoxcarExecutor,
-    resource_manager: ResourceManager,
+    pub bind: SocketAddr,
+    pub executor: BoxcarExecutor,
+    pub resource_manager: ResourceManager,
 }
 impl Server {
     pub fn new() -> Self {
@@ -25,24 +25,15 @@ impl Server {
         }
     }
     pub fn bind(self, bind: SocketAddr) -> Self {
-        Server {
-            bind,
-            executor: self.executor,
-            resource_manager: self.resource_manager,
-        }
+        Server { bind, ..self }
     }
     pub fn executor(self, executor: BoxcarExecutor) -> Self {
-        Server {
-            bind: self.bind,
-            executor,
-            resource_manager: self.resource_manager,
-        }
+        Server { executor, ..self }
     }
     pub fn resource_manager(self, resource_manager: ResourceManager) -> Self {
         Server {
-            bind: self.bind,
-            executor: self.executor,
             resource_manager,
+            ..self
         }
     }
 
