@@ -1,14 +1,13 @@
 use etcd_client::{Client, GetOptions, PutOptions, SortOrder, SortTarget};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
+use std::sync::RwLock;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tracing::{debug, info, trace, warn, Instrument};
-
-use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
 use tokio::time::sleep;
+use tracing::{debug, instrument, trace, warn, Instrument};
 
 // TODO make this configurable when a service is registered
 const ETCD_LEASE_TTL_SEC: u64 = 10;
@@ -107,19 +106,29 @@ impl RegistrationHandle {
 
             loop {
                 if !*lease_control.read().unwrap() {
-                    info!("lease_control set to false, exiting keep alive loop");
+                    debug!(
+                        lease = lease_id,
+                        "lease_control set to false, exiting keep alive loop"
+                    );
                     break;
                 }
                 // send a keep alive request
                 if let Err(e) = keeper.keep_alive().await {
-                    warn!("unable to send keep alive message. {:?}", e)
+                    warn!(
+                        lease = lease_id,
+                        "unable to send keep alive message. {:?}", e
+                    )
                     // TODO after too many consecutive failures, kill the server.
                 } else {
                     // stream the response
                     if let Some(resp) = stream.message().await.unwrap() {
-                        debug!("lease {:?} keep alive, new ttl {:?}", resp.id(), resp.ttl());
+                        trace!(
+                            lease = lease_id,
+                            ttl = resp.ttl(),
+                            "received keepalive response"
+                        );
                     } else {
-                        warn!("unable to read response from the stream");
+                        warn!(lease = lease_id, "unable to read response from the stream");
                     }
                 }
                 // sleep before sending the next ping
@@ -140,7 +149,11 @@ impl RegistrationHandle {
         let val = {
             let mut handle = self.instance.lock().unwrap();
             if *handle == instance {
-                debug!("InstanceRegistration identical. No changes to commit to etcd");
+                debug!(
+                    key = self.path.as_str(),
+                    lease = self.lease_id,
+                    "InstanceRegistration identical. No changes to commit to etcd"
+                );
                 return Ok(());
             } else {
                 *handle = instance;
@@ -173,17 +186,20 @@ impl RegistrationHandle {
 }
 impl Drop for RegistrationHandle {
     fn drop(&mut self) {
-        debug!("RegistrationHandle dropped, signaling for the lease task to stop");
+        debug!(
+            key = self.path.as_str(),
+            lease = self.lease_id,
+            "RegistrationHandle dropped, signaling for the lease task to stop"
+        );
         *self.lease_enabled.write().unwrap() = false;
     }
 }
 
-// #[instrument(skip(client, path))]
+#[instrument(skip(client, path))]
 async fn get_keys(
     mut client: Client,
     path: impl Into<Vec<u8>>,
 ) -> anyhow::Result<Vec<(Vec<u8>, Vec<u8>)>> {
-    trace!("enter get_keys");
     Ok(client
         .get(
             path,
@@ -222,12 +238,6 @@ impl ServiceManager {
         service: impl Into<String>,
         instance: InstanceRegistration,
     ) -> anyhow::Result<RegistrationHandle> {
-        let lease = self
-            .client
-            .lease_grant(ETCD_LEASE_TTL_SEC as i64, None)
-            .await?;
-        debug!(lease = lease.id(), ttl = lease.ttl(), "lease generated");
-
         // {keyspace}/{service}/{instance id}
         let key = format!(
             "{}/{}/{}",
@@ -235,15 +245,30 @@ impl ServiceManager {
             &service.into(),
             &instance.id
         );
+
+        let lease = self
+            .client
+            .lease_grant(ETCD_LEASE_TTL_SEC as i64, None)
+            .await?;
+        debug!(
+            key = key.as_str(),
+            lease = lease.id(),
+            ttl = lease.ttl(),
+            "lease generated"
+        );
+
         let val = serde_json::to_string(&instance)?;
-        trace!(key = key.as_str(), "key contents: {}", &val);
+        trace!(
+            lease = lease.id(),
+            key = key.as_str(),
+            "key contents: {}",
+            &val
+        );
 
         // create a put option object with our lease ID to associate the two
         // the key is present only when the lease is active- so no lease, no key.
         let opts = PutOptions::new().with_lease(lease.id());
-        let put_rq = self.client.put(key.clone(), val, Some(opts)).await?;
-
-        debug!("put request response: {:?}", put_rq);
+        let _ = self.client.put(key.clone(), val, Some(opts)).await?;
 
         let lease_id = lease.id();
         RegistrationHandle::new(self.client.clone(), lease_id, key, instance).await
