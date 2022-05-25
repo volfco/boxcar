@@ -9,6 +9,7 @@
   - time based?
   - # of RPCs executed?
 
+= boxcar_rpc
 - Global
   - [ ] Ensure that all Results are used
   - [ ] Ensure no clippy errors
@@ -29,3 +30,7 @@
 - Client
   - [ ] Add method to un-subscribe from a slot
   - [ ] Clean up Client API, and consider making transport methods their own sub-class, or at least private methods
+
+
+= boxcar-cluster
+- [ ] Implement refresh of instance resource when a task is started. Maybe some sort of Signal Bus exposure from boxcar_rpc

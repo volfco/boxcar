@@ -1,13 +1,23 @@
 **under active development. no api stability until _0.2.0_!**
 
-Boxcar RPC is a framework that provides a fully asynchronous RPC interface. Or an attempt at once.
+Boxcar is a suite of components that builds off of `boxcar-rpc`.
 
-Think- one-to-one Celery/Sidekiq task queue. You define RPC Methods, and then clients can ask the server to execute a 
-method, then close the connection and come back later for a result. Execution of the RPC is not bound to the lifetime of
-the connection. 
+# boxcar-rpc
+Boxcar RPC is an RPC framework that attempts to provide a fully asynchronous RPC interface.
+
+Traditional frameworks, like gRPC, tie the execution to the connection between client/server. If the client disconnects 
+and breaks the socket, you're out of luck for getting the result of the RPC.  While this is not a big issue (thank you TCP),
+it still prevents the client from shutting down until the call is completed. 
+
+Boxcar RPC is something that sits between your traditional RPC framework, and a traditional Task Queue. Celery/Sidekiq
+are great tools for background processing, but are primarily task queues and require a broker (such as Redis) in order 
+to work. 
+
+Boxcar RPC natively uses a sever task queue internally for RPC execution. Any client can execute an RPC and can come back
+later for the result (as long as the server has not restarted. Data is not persisted). The client supports both async
+and sync execution- it's up to the user to select which they one.
 
 Boxcar-rpc uses Websockets for communication.
 
-You can think of Boxcar RPC as a distributed task queue, without the distributed part. If you want to add the 
-distributed part back, [Railyard](https://github.com/volfco/railyard) is a weird hybrid of an ETL Pipeline and Distributed
-Task Queue. 
+# boxcar-cluster
+Boxcar Cluster groups a bunch of boxcar-rpc servers into, well, a cluster. Uses etcd for discovery and metadata
