@@ -1,6 +1,8 @@
 use etcd_client::{Client, GetOptions, PutOptions, SortOrder, SortTarget};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::net::IpAddr;
+use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tracing::{debug, info, trace, warn, Instrument};
 
@@ -24,34 +26,81 @@ impl ServiceManagerConfig {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InstanceRegistration {
     /// Service ID
     /// TODO Make this generated
     pub id: String,
     /// Service Address. Can be a IP address or Hostname
-    pub addr: String,
+    pub addr: IpAddr,
     /// Service Port
     pub port: u16,
     /// Protocol
     pub proto: String,
     /// Meta fields
     pub meta: HashMap<String, String>,
+
+    pub resources: HashMap<String, usize>,
+}
+impl InstanceRegistration {
+    pub fn new() -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            addr: IpAddr::from_str("127.0.0.1").unwrap(),
+            port: 0,
+            proto: "tcp".to_string(),
+            meta: Default::default(),
+            resources: Default::default(),
+        }
+    }
+    pub fn id(self, id: String) -> Self {
+        Self { id, ..self }
+    }
+    pub fn addr(self, addr: IpAddr) -> Self {
+        Self { addr, ..self }
+    }
+    pub fn port(self, port: u16) -> Self {
+        Self { port, ..self }
+    }
+    pub fn proto(self, proto: String) -> Self {
+        Self { proto, ..self }
+    }
+    pub fn meta(self, meta: HashMap<String, String>) -> Self {
+        Self { meta, ..self }
+    }
+    pub fn resources(self, resources: HashMap<String, usize>) -> Self {
+        Self { resources, ..self }
+    }
+}
+impl Default for InstanceRegistration {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Represents a registered instance.
 /// On drop, the instance is unregistered.
 /// The .update method can be used to update the meta key/value store inside the service registration
 pub struct RegistrationHandle {
+    client: Client,
+    path: String,
+    lease_id: i64,
+    instance: Arc<Mutex<InstanceRegistration>>,
     lease_enabled: Arc<RwLock<bool>>,
 }
 impl RegistrationHandle {
-    async fn new(mut client: Client, lease_id: i64) -> anyhow::Result<RegistrationHandle> {
+    async fn new(
+        client: Client,
+        lease_id: i64,
+        path: String,
+        instance: InstanceRegistration,
+    ) -> anyhow::Result<RegistrationHandle> {
         let lease_enabled = Arc::new(RwLock::new(true));
 
         let lease_control = lease_enabled.clone();
+        let mut client_control = client.clone();
         tokio::task::spawn(async move {
-            let (mut keeper, mut stream) = client.lease_keep_alive(lease_id).await.unwrap();
+            let (mut keeper, mut stream) = client_control.lease_keep_alive(lease_id).await.unwrap();
             debug!(lease = lease_id, "lease keepalive start");
 
             let keepalive_time = ETCD_LEASE_TTL_SEC / 2;
@@ -78,11 +127,48 @@ impl RegistrationHandle {
             }
         });
 
-        Ok(RegistrationHandle { lease_enabled })
+        Ok(RegistrationHandle {
+            client,
+            path,
+            lease_id,
+            lease_enabled,
+            instance: Arc::new(Mutex::new(instance)),
+        })
     }
-    /// Update the Service Meta
-    pub async fn update(&self, _key: String, _val: String) {
-        todo!()
+    /// Update the Service InstanceRegistration
+    pub async fn update(&mut self, instance: InstanceRegistration) -> anyhow::Result<()> {
+        let val = {
+            let mut handle = self.instance.lock().unwrap();
+            if *handle == instance {
+                debug!("InstanceRegistration identical. No changes to commit to etcd");
+                return Ok(());
+            } else {
+                *handle = instance;
+            }
+
+            serde_json::to_string(&*handle)?
+        };
+
+        // TODO Do this in a transaction and track the key version to make sure it doesn't change
+        //      underneath us
+        let opts = PutOptions::new().with_lease(self.lease_id);
+        let _ = self.client.put(self.path.clone(), val, Some(opts)).await?;
+
+        Ok(())
+    }
+
+    pub fn peak(&self) -> InstanceRegistration {
+        self.instance.lock().unwrap().clone()
+    }
+
+    /// Deregister the service. Same as dropping the handle
+    pub fn deregister(&self) {
+        *self.lease_enabled.write().unwrap() = false;
+    }
+
+    /// Return if the lease is active or not
+    pub fn active(&self) -> bool {
+        *self.lease_enabled.read().unwrap()
     }
 }
 impl Drop for RegistrationHandle {
@@ -155,12 +241,12 @@ impl ServiceManager {
         // create a put option object with our lease ID to associate the two
         // the key is present only when the lease is active- so no lease, no key.
         let opts = PutOptions::new().with_lease(lease.id());
-        let put_rq = self.client.put(key, val, Some(opts)).await?;
+        let put_rq = self.client.put(key.clone(), val, Some(opts)).await?;
 
         debug!("put request response: {:?}", put_rq);
 
         let lease_id = lease.id();
-        RegistrationHandle::new(self.client.clone(), lease_id).await
+        RegistrationHandle::new(self.client.clone(), lease_id, key, instance).await
     }
 
     pub async fn lookup(
@@ -213,10 +299,11 @@ mod tests {
                 "hello_world",
                 InstanceRegistration {
                     id: "id".to_string(),
-                    addr: "".to_string(),
+                    addr: "127.0.0.1".to_string().parse().unwrap(),
                     port: 0,
                     proto: "tcp".to_string(),
                     meta: Default::default(),
+                    resources: Default::default(),
                 },
             )
             .await;

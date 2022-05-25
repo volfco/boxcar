@@ -1,6 +1,6 @@
 [package]
-name = "etcdsvc-rs"
-version = "0.1.0"
+name = "etcdsvc"
+version = "0.1.2"
 edition = "2021"
 description = ""
 license = "LGPL-3.0-only"
