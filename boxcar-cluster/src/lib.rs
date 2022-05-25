@@ -1,5 +1,5 @@
 use boxcar_rpc::rcm::ResourceManager;
-use etcdsvc_rs::{RegistrationHandle, ServiceManagerConfig};
+use etcdsvc::{RegistrationHandle, ServiceManagerConfig};
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
@@ -9,7 +9,7 @@ const METADATA_REFRESH_INTERVAL: u64 = 6;
 
 pub struct Service {
     name: String,
-    service_manager: etcdsvc_rs::ServiceManager,
+    service_manager: etcdsvc::ServiceManager,
     server: boxcar_rpc::Server,
     metadata: HashMap<String, String>,
 }
@@ -19,7 +19,7 @@ impl Service {
         server: boxcar_rpc::Server,
         etcd_client: etcd_client::Client,
     ) -> anyhow::Result<Service> {
-        let service_manager = etcdsvc_rs::ServiceManager::new(
+        let service_manager = etcdsvc::ServiceManager::new(
             etcd_client.clone(),
             ServiceManagerConfig::new("boxcar-cluster"),
         )
@@ -38,7 +38,7 @@ impl Service {
     }
 
     pub async fn serve(&mut self) -> anyhow::Result<()> {
-        let instance_config = etcdsvc_rs::InstanceRegistration::new()
+        let instance_config = etcdsvc::InstanceRegistration::new()
             .addr(self.server.bind.ip())
             .port(self.server.bind.port())
             .meta(self.metadata.clone())
@@ -90,7 +90,6 @@ async fn lease_metadata_updater(
 
 #[cfg(test)]
 mod tests {
-    use crate::Service;
 
     #[tokio::test]
     async fn test_foo() {
