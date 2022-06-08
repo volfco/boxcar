@@ -70,6 +70,6 @@ mod tests {
         };
 
         let mut cc = cluster_client.unwrap();
-        let req = cc.call(command, ClusteredCallConfig::new()).await;
+        let req = cc.call(command, ClusteredCallConfig::new()).await.unwrap();
     }
 }

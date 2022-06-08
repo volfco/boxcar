@@ -363,9 +363,10 @@ mod tests {
 
         assert_eq!(hsvc.is_ok(), true);
 
-        let handle = hsvc.unwrap();
+        let _handle = hsvc.unwrap();
 
-        svc.query("hello_world2", "id").await;
+        let r = svc.query("hello_world2", "id").await;
+        assert_eq!(r.is_ok(), true)
     }
 
     #[tokio::test]
@@ -386,7 +387,7 @@ mod tests {
 
         let hsvc = svc
             .register(
-                "hello_world",
+                "hello_world2",
                 InstanceRegistration {
                     id: "id".to_string(),
                     addr: "127.0.0.1".to_string().parse().unwrap(),
@@ -404,7 +405,7 @@ mod tests {
 
         sleep(Duration::from_secs(2)).await;
 
-        let lookup = svc.lookup("hello_world").await;
+        let lookup = svc.lookup("hello_world2").await;
         assert_eq!(lookup.is_ok(), true);
         let services = lookup.unwrap();
         assert_eq!(services.len(), 1);
@@ -416,7 +417,7 @@ mod tests {
         sleep(Duration::from_secs(ETCD_LEASE_TTL_SEC + 1)).await;
 
         // now, re-check to see if it's gone
-        let lookup = svc.lookup("hello_world").await;
+        let lookup = svc.lookup("hello_world2").await;
         assert_eq!(lookup.is_ok(), true);
         let services = lookup.unwrap();
         assert_eq!(services.len(), 0);

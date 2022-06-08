@@ -42,7 +42,7 @@ mod tests {
         let server_a = Server::new()
             .bind("127.0.0.1:9801".parse().unwrap())
             .executor(executor.clone());
-        let mut service_a = Service::new("boxcar-testing", server_a, client.clone())
+        let mut service_a = Service::new("boxcar-testing-two", server_a, client.clone())
             .await
             .unwrap();
         tokio::task::spawn(async move { service_a.serve().await });
@@ -50,7 +50,7 @@ mod tests {
         let server_b = Server::new()
             .bind("127.0.0.1:9801".parse().unwrap())
             .executor(executor.clone());
-        let mut service_b = Service::new("boxcar-testing", server_b, client.clone())
+        let mut service_b = Service::new("boxcar-testing-two", server_b, client.clone())
             .await
             .unwrap();
         tokio::task::spawn(async move { service_b.serve().await });
@@ -65,7 +65,7 @@ mod tests {
         .await
         .unwrap();
 
-        let lookup = service_manager.lookup("boxcar-testing").await;
+        let lookup = service_manager.lookup("boxcar-testing-two").await;
         assert_eq!(lookup.is_ok(), true);
         let services = lookup.unwrap();
         assert_eq!(services.len(), 2);
