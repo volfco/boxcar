@@ -1,3 +1,4 @@
+use anyhow::bail;
 use etcd_client::{Client, GetOptions, PutOptions, SortOrder, SortTarget};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -274,6 +275,7 @@ impl ServiceManager {
         RegistrationHandle::new(self.client.clone(), lease_id, key, instance).await
     }
 
+    /// Lookup Instances
     pub async fn lookup(
         &mut self,
         service: impl Into<String>,
@@ -290,6 +292,32 @@ impl ServiceManager {
         .collect())
     }
 
+    /// Return information on a specific instance of a service
+    pub async fn query(
+        &mut self,
+        service: impl Into<String>,
+        instance_id: impl Into<String>,
+    ) -> anyhow::Result<InstanceRegistration> {
+        let r = self
+            .client
+            .get(
+                format!(
+                    "{}/{}/{}",
+                    self.config.keyspace,
+                    &service.into(),
+                    &instance_id.into()
+                ),
+                None,
+            )
+            .await?;
+
+        if let Some(key) = r.kvs().first() {
+            Ok(serde_json::from_slice(key.value())?)
+        } else {
+            bail!("instance not found")
+        }
+    }
+
     /// Starts a watcher on the given service name, causing the results for `ServiceManager.lookup`
     /// to be cached- avoiding the call to etcd to get the services
     pub async fn watch(&mut self, _service: impl Into<String>) -> anyhow::Result<()> {
@@ -302,6 +330,43 @@ mod tests {
     use crate::{InstanceRegistration, ServiceManager, ServiceManagerConfig, ETCD_LEASE_TTL_SEC};
     use std::time::Duration;
     use tokio::time::sleep;
+
+    #[tokio::test]
+    async fn test_svc_query() {
+        let client = etcd_client::Client::connect(["localhost:2379"], None)
+            .await
+            .unwrap();
+
+        #[warn(unused_mut)]
+        let mut svc = ServiceManager::new(
+            client,
+            ServiceManagerConfig {
+                keyspace: "test".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let hsvc = svc
+            .register(
+                "hello_world2",
+                InstanceRegistration {
+                    id: "id".to_string(),
+                    addr: "127.0.0.2".to_string().parse().unwrap(),
+                    port: 0,
+                    proto: "tcp".to_string(),
+                    meta: Default::default(),
+                    resources: Default::default(),
+                },
+            )
+            .await;
+
+        assert_eq!(hsvc.is_ok(), true);
+
+        let handle = hsvc.unwrap();
+
+        svc.query("hello_world2", "id").await;
+    }
 
     #[tokio::test]
     async fn test_reg() {
