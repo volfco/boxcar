@@ -39,6 +39,7 @@ impl Server {
 
     #[instrument]
     pub async fn serve(&self) -> anyhow::Result<()> {
+        trace!("starting server");
         // TODO Implement a finite slot limit for connections, so a connection will occupy a specific slot
         while let Ok((stream, addr)) = TcpListener::bind(self.bind).await?.accept().await {
             trace!(

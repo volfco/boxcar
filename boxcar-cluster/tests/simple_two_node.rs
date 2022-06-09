@@ -48,7 +48,7 @@ mod tests {
         tokio::task::spawn(async move { service_a.serve().await });
 
         let server_b = Server::new()
-            .bind("127.0.0.1:9801".parse().unwrap())
+            .bind("127.0.0.1:9855".parse().unwrap())
             .executor(executor.clone());
         let mut service_b = Service::new("boxcar-testing-two", server_b, client.clone())
             .await

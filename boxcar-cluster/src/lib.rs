@@ -1,3 +1,4 @@
+use anyhow::bail;
 use boxcar_rpc::rcm::ResourceManager;
 use boxcar_rpc::{BoxcarMessage, RpcRequest};
 use etcdsvc::{InstanceRegistration, RegistrationHandle, ServiceManager, ServiceManagerConfig};
@@ -5,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 const METADATA_REFRESH_INTERVAL: u64 = 6; // seconds
 
@@ -21,8 +22,9 @@ impl Service {
         server: boxcar_rpc::Server,
         etcd_client: etcd_client::Client,
     ) -> anyhow::Result<Service> {
-        let service_manager = etcdsvc::ServiceManager::new(
+        let service_manager = ServiceManager::new(
             etcd_client.clone(),
+            // TODO Remove this hard-coded constant
             ServiceManagerConfig::new("boxcar-cluster"),
         )
         .await?;
@@ -40,11 +42,15 @@ impl Service {
     }
 
     pub async fn serve(&mut self) -> anyhow::Result<()> {
-        let instance_config = etcdsvc::InstanceRegistration::new()
+        debug!("starting boxcar-cluster server");
+
+        let instance_config = InstanceRegistration::new()
             .addr(self.server.bind.ip())
             .port(self.server.bind.port())
             .meta(self.metadata.clone())
             .resources(self.server.resource_manager.peak());
+
+        trace!("resources: {:?}", &instance_config);
 
         let service = self
             .service_manager
@@ -54,8 +60,7 @@ impl Service {
         tokio::task::spawn(lease_metadata_updater(
             self.server.resource_manager.clone(),
             service,
-        ))
-        .await?;
+        ));
 
         self.server.serve().await
     }
@@ -66,6 +71,7 @@ async fn lease_metadata_updater(
     resource_manager: ResourceManager,
     mut service_handle: RegistrationHandle,
 ) {
+    trace!("started metadata updater");
     loop {
         sleep(Duration::from_secs(METADATA_REFRESH_INTERVAL)).await;
 
@@ -102,7 +108,7 @@ impl Client {
         service: impl Into<String>,
     ) -> anyhow::Result<Self> {
         let service_manager =
-            ServiceManager::new(etcd.clone(), ServiceManagerConfig::new("testing")).await?;
+            ServiceManager::new(etcd.clone(), ServiceManagerConfig::new("boxcar-cluster")).await?;
 
         Ok(Client {
             etcd,
@@ -124,6 +130,10 @@ impl Client {
             // TODO Can we do both filter & sort in one?
             .filter(|v| filter_targets(v, &inner))
             .collect::<Vec<InstanceRegistration>>();
+
+        if targets.is_empty() {
+            bail!("no matches instances")
+        }
 
         targets.sort_by(|a, b| sort_targets(&inner, a, b));
 
@@ -147,7 +157,7 @@ impl Client {
 
             // TODO move onto the next target if this fails
             let new_client =
-                boxcar_rpc::Client::new(format!("{}:{}", &target.addr, &target.port).as_str())
+                boxcar_rpc::Client::new(format!("ws://{}:{}", &target.addr, &target.port).as_str())
                     .await?;
             self.clients.insert(target.id.clone(), new_client.clone());
             new_client
