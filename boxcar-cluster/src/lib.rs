@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::time::sleep;
-use tracing::{debug, error, trace, warn};
+use tracing::{debug, trace, warn};
 
 const METADATA_REFRESH_INTERVAL: u64 = 6; // seconds
 
@@ -97,7 +97,6 @@ async fn lease_metadata_updater(
 }
 
 pub struct Client {
-    etcd: etcd_client::Client,
     service: String,
     service_manager: ServiceManager,
     clients: HashMap<String, boxcar_rpc::Client>,
@@ -107,13 +106,13 @@ impl Client {
         etcd: etcd_client::Client,
         service: impl Into<String>,
     ) -> anyhow::Result<Self> {
-        let service_manager =
-            ServiceManager::new(etcd.clone(), ServiceManagerConfig::new("boxcar-cluster")).await?;
-
         Ok(Client {
-            etcd,
             service: service.into(),
-            service_manager,
+            service_manager: ServiceManager::new(
+                etcd.clone(),
+                ServiceManagerConfig::new("boxcar-cluster"),
+            )
+            .await?,
             clients: Default::default(),
         })
     }
@@ -221,6 +220,11 @@ impl ClusteredCallConfig {
         Self { dense_pack: true }
     }
 }
+impl Default for ClusteredCallConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -304,7 +308,7 @@ mod tests {
             resources,
         };
 
-        let mut targets = get_instances()
+        let targets = get_instances()
             .into_iter()
             .filter(|v| filter_targets(v, &req))
             .collect::<Vec<InstanceRegistration>>();

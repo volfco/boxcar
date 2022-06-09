@@ -1,3 +1,4 @@
+#[warn(unused_imports)]
 #[cfg(test)]
 mod tests {
     use async_trait::async_trait;
@@ -7,7 +8,6 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tokio::time::sleep;
-    use tracing::log::error;
 
     struct TestHandler {}
     #[async_trait]

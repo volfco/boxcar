@@ -70,7 +70,6 @@ impl Debug for Server {
 
 type WireMessageChan = (WireMessage, Option<Arc<Notify>>);
 
-///
 /// c_slot 0 is reserved for unsolicited communication
 #[instrument]
 async fn connection_handler(
