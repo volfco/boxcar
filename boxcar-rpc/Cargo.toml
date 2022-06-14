@@ -1,17 +1,24 @@
 [package]
 name = "boxcar_rpc"
-version = "0.2.0-alpha1"
+description = "Async RPC Framework"
+version = "0.2.0-alpha2"
 edition = "2021"
-description = "boxcar-rpc"
-license = "LGPL-3.0-only"
+license = "Apache-2.0"
+keywords = ["websockets", "rpc"]
+categories = ["network-programming"]
+authors = ["Colum McGaley <rust@m1.volf.co>"]
+
+homepage = "https://rust.volf.co/boxcar_rpc"
+repository = "https://github.com/volfco/boxcar_rpc"
+readme = "README.md"
+
+
 
 [dependencies]
 anyhow = "1.0"
-quote = "1.0"
 async-trait = "0.1"
 url = "0.5"
 tracing = "0.1"
-tracing-subscriber = "0.2"
 
 rand = "0.8"
 
@@ -24,3 +31,6 @@ tokio-tungstenite = { version = "0.16"}
 futures-core = "0.3"
 futures-util = "0.3"
 deadqueue = "0.2"
+
+[dev-dependencies]
+tracing-subscriber = "0.2"
